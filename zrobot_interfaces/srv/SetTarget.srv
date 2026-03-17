@@ -1,0 +1,5 @@
+# Set target object service
+string target_object          # Object class to track (e.g., "person", "car")
+---
+bool success                  # True if target was set successfully
+string message                # Status message

@@ -1,0 +1,20 @@
+# ZRobot Configuration
+# ROS2 version
+
+zrobot_perception:
+  ros__parameters:
+    model_path: "models/yolov8s.rknn"
+    camera_id: 1
+    width: 640
+    height: 640
+    fps: 30
+    conf_threshold: 0.3
+    target_object: "person"
+
+zrobot_control:
+  ros__parameters:
+    uart_port: "/dev/ttyACM0"
+    baud_rate: 9600
+    max_speed: 245
+    min_speed: 165
+    enabled: true

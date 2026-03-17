@@ -1,0 +1,42 @@
+# ROS2 build artifacts
+build/
+install/
+log/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.eggs/
+
+# C++ artifacts
+*.o
+*.obj
+*.a
+*.lib
+*.so.*
+*.dylib
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (large files)
+*.rknn
+models/
+
+# Logs
+*.log
+
+# Configuration overrides
+*.yaml.local

@@ -1,0 +1,6 @@
+# Set configuration parameters service
+string parameter_name         # Parameter to change (e.g., "confidence", "max_speed")
+float32 value                 # New value
+---
+bool success                  # True if parameter was set successfully
+string message                # Status message
