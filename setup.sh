@@ -7,6 +7,11 @@ echo "=========================================="
 echo "ZRobot ROS2 Setup"
 echo "=========================================="
 
+# DDS: keep default RMW (FastDDS on most Jazzy installs), but avoid forcing an
+# incompatible FastDDS profile XML (segment_count, etc.).
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+unset FASTRTPS_DEFAULT_PROFILES_FILE
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'

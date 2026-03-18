@@ -74,6 +74,10 @@ class WebInterfaceNode(Node):
         self.detection_history = deque(maxlen=30)
         self.motor_history = deque(maxlen=30)
 
+        # Alerts/notifications disabled (they can cause UI lag on some devices)
+        self.last_obstacle_alert_time = 0
+        self.obstacle_alert_cooldown = 0.0
+
         self._init_system_state()
         self._init_settings()
 
@@ -157,7 +161,7 @@ class WebInterfaceNode(Node):
             'adaptive_threshold': False,
             'show_category': True,
             'motor_enabled': True,
-            'max_speed': 245,
+            'max_speed': 200,
             'obstacle_avoidance_enabled': True,
             'min_safe_distance': 0.3,
             'slow_down_distance': 0.5,
@@ -212,8 +216,7 @@ class WebInterfaceNode(Node):
 
     def obstacle_callback(self, msg):
         self.system_state['obstacle_avoidance']['obstacle_detected'] = msg.data
-        if msg.data:
-            self._add_alert('WARNING', 'Obstacle detected!')
+        # notifications disabled
 
     def obstacle_status_callback(self, msg):
         try:
@@ -229,16 +232,31 @@ class WebInterfaceNode(Node):
     def motor_status_callback(self, msg):
         try:
             data = json.loads(msg.data)
+            left = int(data.get('left_speed', 0))
+            right = int(data.get('right_speed', 0))
+            speed = max(abs(left), abs(right))
+
+            arduino_event = data.get('arduino_last_event') or data.get('arduino_last_line')
+            error = arduino_event if isinstance(arduino_event, str) and ('EMERGENCY' in arduino_event or 'TIMEOUT' in arduino_event) else None
+
             self.system_state['motor'].update({
-                'enabled': data.get('enabled', True),
-                'speed': data.get('speed', 0),
-                'status': data.get('status', 'stopped'),
-                'error': data.get('error')
+                'enabled': bool(data.get('enabled', True)),
+                'connected': bool(data.get('connected', False)),
+                'left_speed': left,
+                'right_speed': right,
+                'speed': speed,
+                'last_cmd_age_ms': data.get('last_cmd_age_ms', None),
+                'last_rx_age_ms': data.get('last_rx_age_ms', None),
+                'arduino_seen': bool(data.get('arduino_seen', False)),
+                'arduino_last_line': data.get('arduino_last_line', None),
+                'arduino_last_event': data.get('arduino_last_event', None),
+                'status': 'running' if (speed > 0 and bool(data.get('enabled', True))) else 'stopped',
+                'error': error,
             })
             self.motor_history.append({
                 'timestamp': time.time(),
-                'speed': data.get('speed', 0),
-                'enabled': data.get('enabled', True)
+                'speed': speed,
+                'enabled': bool(data.get('enabled', True))
             })
         except Exception as e:
             self._add_log('WARN', f'Motor status parse error: {e}')
@@ -266,12 +284,8 @@ class WebInterfaceNode(Node):
             self.log_buffer.popleft()
 
     def _add_alert(self, level, message):
-        alert = {
-            'level': level,
-            'message': message,
-            'timestamp': int(time.time() * 1000)
-        }
-        self.alerts.append(alert)
+        # notifications disabled
+        return
 
     def update_system_stats(self):
         uptime = time.time() - self.start_time
@@ -737,7 +751,7 @@ class WebInterfaceNode(Node):
         </div>
     </header>
 
-    <div class="alert-banner" id="alertBanner"></div>
+    <!-- Alerts disabled to reduce UI lag -->
 
     <div class="main-container">
         <div class="video-section">
@@ -815,12 +829,12 @@ class WebInterfaceNode(Node):
                     </div>
                 </div>
                 <div class="motor-grid">
-                    <button class="motor-btn" onmousedown="sendMotor(0, 0.5)" onmouseup="sendStop()">↑</button>
+                    <button class="motor-btn" onmousedown="startMotor(0.5, 0)" onmouseup="stopMotor()" ontouchstart="startMotor(0.5, 0)" ontouchend="stopMotor()">↑</button>
                     <button class="motor-btn stop" onclick="sendStop()">■</button>
-                    <button class="motor-btn" onmousedown="sendMotor(0, -0.5)" onmouseup="sendStop()">↓</button>
-                    <button class="motor-btn" onmousedown="sendMotor(-0.3, 0)" onmouseup="sendStop()">←</button>
+                    <button class="motor-btn" onmousedown="startMotor(-0.5, 0)" onmouseup="stopMotor()" ontouchstart="startMotor(-0.5, 0)" ontouchend="stopMotor()">↓</button>
+                    <button class="motor-btn" onmousedown="startMotor(0, 0.5)" onmouseup="stopMotor()" ontouchstart="startMotor(0, 0.5)" ontouchend="stopMotor()">←</button>
                     <button class="motor-btn stop" onclick="emergencyStop()">⚠</button>
-                    <button class="motor-btn" onmousedown="sendMotor(0.3, 0)" onmouseup="sendStop()">→</button>
+                    <button class="motor-btn" onmousedown="startMotor(0, -0.5)" onmouseup="stopMotor()" ontouchstart="startMotor(0, -0.5)" ontouchend="stopMotor()">→</button>
                 </div>
             </div>
 
@@ -844,10 +858,85 @@ class WebInterfaceNode(Node):
                     <label>Target</label>
                     <select id="targetSelect" style="width: 120px;" onchange="updateSetting('target_object', this.value)">
                         <option value="person">Person</option>
-                        <option value="car">Car</option>
-                        <option value="dog">Dog</option>
-                        <option value="cat">Cat</option>
                         <option value="bicycle">Bicycle</option>
+                        <option value="car">Car</option>
+                        <option value="motorcycle">Motorcycle</option>
+                        <option value="airplane">Airplane</option>
+                        <option value="bus">Bus</option>
+                        <option value="train">Train</option>
+                        <option value="truck">Truck</option>
+                        <option value="boat">Boat</option>
+                        <option value="traffic light">Traffic light</option>
+                        <option value="fire hydrant">Fire hydrant</option>
+                        <option value="stop sign">Stop sign</option>
+                        <option value="parking meter">Parking meter</option>
+                        <option value="bench">Bench</option>
+                        <option value="bird">Bird</option>
+                        <option value="cat">Cat</option>
+                        <option value="dog">Dog</option>
+                        <option value="horse">Horse</option>
+                        <option value="sheep">Sheep</option>
+                        <option value="cow">Cow</option>
+                        <option value="elephant">Elephant</option>
+                        <option value="bear">Bear</option>
+                        <option value="zebra">Zebra</option>
+                        <option value="giraffe">Giraffe</option>
+                        <option value="backpack">Backpack</option>
+                        <option value="umbrella">Umbrella</option>
+                        <option value="handbag">Handbag</option>
+                        <option value="tie">Tie</option>
+                        <option value="suitcase">Suitcase</option>
+                        <option value="frisbee">Frisbee</option>
+                        <option value="skis">Skis</option>
+                        <option value="snowboard">Snowboard</option>
+                        <option value="sports ball">Sports ball</option>
+                        <option value="kite">Kite</option>
+                        <option value="baseball bat">Baseball bat</option>
+                        <option value="baseball glove">Baseball glove</option>
+                        <option value="skateboard">Skateboard</option>
+                        <option value="surfboard">Surfboard</option>
+                        <option value="tennis racket">Tennis racket</option>
+                        <option value="bottle">Bottle</option>
+                        <option value="wine glass">Wine glass</option>
+                        <option value="cup">Cup</option>
+                        <option value="fork">Fork</option>
+                        <option value="knife">Knife</option>
+                        <option value="spoon">Spoon</option>
+                        <option value="bowl">Bowl</option>
+                        <option value="banana">Banana</option>
+                        <option value="apple">Apple</option>
+                        <option value="sandwich">Sandwich</option>
+                        <option value="orange">Orange</option>
+                        <option value="broccoli">Broccoli</option>
+                        <option value="carrot">Carrot</option>
+                        <option value="hot dog">Hot dog</option>
+                        <option value="pizza">Pizza</option>
+                        <option value="donut">Donut</option>
+                        <option value="cake">Cake</option>
+                        <option value="chair">Chair</option>
+                        <option value="couch">Couch</option>
+                        <option value="potted plant">Potted plant</option>
+                        <option value="bed">Bed</option>
+                        <option value="dining table">Dining table</option>
+                        <option value="toilet">Toilet</option>
+                        <option value="tv">TV</option>
+                        <option value="laptop">Laptop</option>
+                        <option value="mouse">Mouse</option>
+                        <option value="remote">Remote</option>
+                        <option value="keyboard">Keyboard</option>
+                        <option value="cell phone">Cell phone</option>
+                        <option value="microwave">Microwave</option>
+                        <option value="oven">Oven</option>
+                        <option value="toaster">Toaster</option>
+                        <option value="sink">Sink</option>
+                        <option value="refrigerator">Refrigerator</option>
+                        <option value="book">Book</option>
+                        <option value="clock">Clock</option>
+                        <option value="vase">Vase</option>
+                        <option value="scissors">Scissors</option>
+                        <option value="teddy bear">Teddy bear</option>
+                        <option value="hair drier">Hair drier</option>
+                        <option value="toothbrush">Toothbrush</option>
                     </select>
                 </div>
                 <div class="setting-row">
@@ -901,8 +990,6 @@ class WebInterfaceNode(Node):
                     updateUI(data.data);
                 } else if (data.type === 'welcome') {
                     updateSettingsUI(data.settings);
-                } else if (data.type === 'alert') {
-                    showAlert(data.message);
                 }
             };
 
@@ -971,9 +1058,7 @@ class WebInterfaceNode(Node):
                 ).join('');
             }
 
-            if (state.alerts && state.alerts.length > 0) {
-                showAlert(state.alerts[state.alerts.length - 1].message);
-            }
+            // alerts disabled
         }
 
         function updateSettingsUI(settings) {
@@ -991,12 +1076,7 @@ class WebInterfaceNode(Node):
             return `${h}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
         }
 
-        function showAlert(message) {
-            const banner = document.getElementById('alertBanner');
-            banner.textContent = message;
-            banner.classList.add('show');
-            setTimeout(() => banner.classList.remove('show'), 5000);
-        }
+        function showAlert(message) { /* alerts disabled */ }
 
         function updateSetting(key, value) {
             fetch('/api/settings', {
@@ -1033,23 +1113,43 @@ class WebInterfaceNode(Node):
             });
         }
 
-        function sendMotor(linear, angular) {
+        let motorInterval = null;
+        let lastMotorCmd = {linear: 0, angular: 0};
+
+        function sendMotorOnce(linear, angular) {
+            lastMotorCmd = {linear: linear, angular: angular};
             fetch('/api/motor', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({linear: linear, angular: angular})
-            });
+                body: JSON.stringify(lastMotorCmd)
+            }).catch(() => {});
         }
 
-        function sendStop() {
-            sendMotor(0, 0);
+        function startMotor(linear, angular) {
+            stopMotor(); // avoid multiple timers
+            sendMotorOnce(linear, angular);
+            // Keep-alive for Arduino-side CMD_TIMEOUT
+            motorInterval = setInterval(() => {
+                sendMotorOnce(lastMotorCmd.linear, lastMotorCmd.angular);
+            }, 100);
         }
+
+        function stopMotor() {
+            if (motorInterval) {
+                clearInterval(motorInterval);
+                motorInterval = null;
+            }
+            sendMotorOnce(0, 0);
+        }
+
+        // Backward compatible
+        function sendMotor(linear, angular) { startMotor(linear, angular); }
+        function sendStop() { stopMotor(); }
 
         function emergencyStop() {
             fetch('/api/motor', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({emergency: true})
             });
-            showAlert('EMERGENCY STOP ACTIVATED!');
         }
 
         function updateVideo() {

@@ -144,6 +144,43 @@ struct TrackedObject {
         );
     }
     
+    void updateSmoothed(const cv::Rect& rect, float conf) {
+        cv::Point2f center(rect.x + rect.width/2, rect.y + rect.height/2);
+        
+        // Apply Kalman filter update
+        tracker.update(center, rect.width, rect.height);
+        
+        // Smooth position with exponential moving average
+        if (!history.empty()) {
+            const cv::Rect& last = history.back();
+            cv::Point2f last_center(last.x + last.width/2, last.y + last.height/2);
+            float smoothing = 0.7f;
+            center.x = smoothing * center.x + (1.0f - smoothing) * last_center.x;
+            center.y = smoothing * center.y + (1.0f - smoothing) * last_center.y;
+        }
+        
+        cv::Rect smoothed_rect(
+            static_cast<int>(center.x - rect.width/2),
+            static_cast<int>(center.y - rect.height/2),
+            rect.width,
+            rect.height
+        );
+        
+        history.push_back(smoothed_rect);
+        if (history.size() > 35) history.pop_front();
+        
+        confidence_history.push_back(conf);
+        if (confidence_history.size() > 35) confidence_history.pop_front();
+        
+        last_position = center;
+        last_size = cv::Size2f(rect.width, rect.height);
+        age++;
+        consecutive_misses = 0;
+        
+        // Require more frames for confirmation (improved stability)
+        if (age >= 5) is_confirmed = true;
+    }
+    
     float getAverageConfidence() const {
         if (confidence_history.empty()) return 0.0f;
         float sum = 0.0f;
@@ -162,12 +199,12 @@ struct TrackedObject {
     }
 };
 
-// Multi-object tracker with Hungarian algorithm
+// Multi-object tracker with Hungarian algorithm - Enhanced stability
 class MultiObjectTracker {
 public:
-    MultiObjectTracker(float iou_threshold = 0.3f, 
-                       int max_consecutive_misses = 15,
-                       float confidence_decay = 0.9f)
+    MultiObjectTracker(float iou_threshold = 0.35f,      // Higher for stricter matching
+                       int max_consecutive_misses = 10,    // Faster response to lost targets
+                       float confidence_decay = 0.95f)     // Slower decay for stability
         : iou_threshold_(iou_threshold),
           max_consecutive_misses_(max_consecutive_misses),
           confidence_decay_(confidence_decay),
@@ -177,15 +214,20 @@ public:
                                        const std::vector<int>& labels,
                                        const std::vector<std::string>& class_names,
                                        const std::vector<float>& confidences) {
-        // Age existing tracks
+        // Age existing tracks with decay
         for (auto& track : tracks_) {
             track.consecutive_misses++;
-            track.confidence_history.push_back(
-                track.confidence_history.back() * confidence_decay_
-            );
+            if (!track.confidence_history.empty()) {
+                track.confidence_history.push_back(
+                    track.confidence_history.back() * confidence_decay_
+                );
+                if (track.confidence_history.size() > 35) {
+                    track.confidence_history.pop_front();
+                }
+            }
         }
         
-        // Build cost matrix (IoU based)
+        // Build cost matrix (IoU based) with class matching bonus
         int n_tracks = tracks_.size();
         int n_detections = detections.size();
         
@@ -195,19 +237,21 @@ public:
         for (int i = 0; i < n_tracks; i++) {
             for (int j = 0; j < n_detections; j++) {
                 if (tracks_[i].label != labels[j]) {
-                    cost_matrix[i][j] = 0;  // Different classes
+                    cost_matrix[i][j] = 0;  // Different classes - no match
                 } else {
-                    cost_matrix[i][j] = computeIoU(tracks_[i], detections[j]);
+                    float iou = computeIoU(tracks_[i], detections[j]);
+                    // Add confidence bonus for better detections
+                    cost_matrix[i][j] = iou * (0.7f + 0.3f * confidences[j]);
                 }
             }
         }
         
-        // Hungarian algorithm (greedy approximation)
+        // Hungarian algorithm (greedy with priority queue)
         std::vector<bool> track_matched(n_tracks, false);
         std::vector<bool> detection_matched(n_detections, false);
         std::vector<std::pair<int, int>> matches;
         
-        // Sort by highest IoU first
+        // Sort by highest cost first
         std::vector<std::tuple<float, int, int>> sorted_costs;
         for (int i = 0; i < n_tracks; i++) {
             for (int j = 0; j < n_detections; j++) {
@@ -227,9 +271,9 @@ public:
             }
         }
         
-        // Update matched tracks
+        // Update matched tracks with prediction smoothing
         for (const auto& [ti, di] : matches) {
-            tracks_[ti].update(detections[di], confidences[di]);
+            tracks_[ti].updateSmoothed(detections[di], confidences[di]);
         }
         
         // Create new tracks for unmatched detections
@@ -242,11 +286,12 @@ public:
             }
         }
         
-        // Remove lost tracks
+        // Remove lost tracks with lower confidence requirement
         tracks_.erase(
             std::remove_if(tracks_.begin(), tracks_.end(),
                 [this](const TrackedObject& t) {
-                    return t.consecutive_misses > max_consecutive_misses_;
+                    return t.consecutive_misses > max_consecutive_misses_ ||
+                           t.getAverageConfidence() < 0.35f;
                 }),
             tracks_.end()
         );

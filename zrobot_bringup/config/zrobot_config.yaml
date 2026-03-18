@@ -15,6 +15,6 @@ zrobot_control:
   ros__parameters:
     uart_port: "/dev/ttyACM0"
     baud_rate: 9600
-    max_speed: 245
-    min_speed: 165
+    max_speed: 200
+    min_speed: 115
     enabled: true

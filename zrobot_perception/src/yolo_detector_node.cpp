@@ -2,6 +2,7 @@
 #include <sensor_msgs/msg/image.hpp>
 #include <vision_msgs/msg/detection2_d_array.hpp>
 #include <geometry_msgs/msg/point.hpp>
+#include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/string.hpp>
 #include <cv_bridge/cv_bridge/cv_bridge.hpp>
 #include <opencv2/opencv.hpp>
@@ -34,20 +35,24 @@ const std::vector<std::string> COCO_NAMES = []() {
 }();
 
 // ============================================================================
-// ADVANCED DETECTION PARAMETERS
+// ADVANCED DETECTION PARAMETERS - OPTIMIZED FOR STABILITY
 // ============================================================================
 struct DetectionParams {
-    float conf_threshold = 0.25f;
-    float nms_threshold = 0.45f;
-    float min_area_ratio = 0.001f;
-    float max_area_ratio = 0.5f;
+    float conf_threshold = 0.47f;          // 47% threshold for better accuracy
+    float nms_threshold = 0.4f;              // Stricter NMS for fewer duplicates
+    float min_area_ratio = 0.002f;           // Filter tiny detections
+    float max_area_ratio = 0.45f;            // Filter oversized detections
     bool enable_tracking = true;
     bool temporal_filtering = true;
-    int history_size = 30;
-    float velocity_weight = 0.3f;
-    float confidence_decay = 0.9f;
-    int max_consecutive_misses = 15;
-    float iou_threshold = 0.3f;
+    int history_size = 35;                   // Larger history for smoother tracking
+    float velocity_weight = 0.25f;           // Lower velocity weight for stability
+    float confidence_decay = 0.95f;          // Slower decay = more stable confidence
+    int max_consecutive_misses = 10;         // Faster response to lost targets
+    float iou_threshold = 0.35f;             // Higher IoU threshold for stricter matching
+    int min_confirm_frames = 5;              // Need 5 frames to confirm detection
+    float hysteresis_margin = 0.05f;         // 5% margin for detection stability
+    int class_stability_window = 5;          // Check class over 5 frames
+    float position_smoothing = 0.6f;         // Smoothing factor for position (0-1)
 };
 
 // ============================================================================
@@ -108,11 +113,9 @@ class AdaptiveThresholdController {
 public:
     void update(float current_fps, float target_fps = 25.0f) {
         if (current_fps < target_fps * 0.8f) {
-            // Increase threshold to reduce detections
-            conf_threshold_ = std::min(0.8f, conf_threshold_ + 0.02f);
+            conf_threshold_ = std::min(0.75f, conf_threshold_ + 0.02f);
         } else if (current_fps > target_fps * 1.2f) {
-            // Decrease threshold for more detections
-            conf_threshold_ = std::max(0.1f, conf_threshold_ - 0.01f);
+            conf_threshold_ = std::max(0.35f, conf_threshold_ - 0.01f);
         }
     }
     
@@ -120,7 +123,129 @@ public:
     void reset(float value) { conf_threshold_ = value; }
     
 private:
-    float conf_threshold_ = 0.25f;
+    float conf_threshold_ = 0.47f;
+};
+
+// ============================================================================
+// DETECTION STABILITY CONTROLLER - Prevents flickering
+// ============================================================================
+class DetectionStabilityController {
+public:
+    DetectionStabilityController() : last_detection_state_(false), stable_count_(0), unstable_count_(0) {}
+    
+    bool isStableDetection(bool current_detected, float confidence) {
+        if (current_detected && confidence >= 0.50f) {
+            stable_count_++;
+            unstable_count_ = 0;
+            if (stable_count_ >= 3) {
+                last_detection_state_ = true;
+                return true;
+            }
+        } else if (!current_detected) {
+            unstable_count_++;
+            stable_count_ = 0;
+            if (unstable_count_ >= 4) {
+                last_detection_state_ = false;
+            }
+        } else if (confidence >= 0.47f && confidence < 0.50f) {
+            stable_count_++;
+            unstable_count_ = 0;
+            if (stable_count_ >= 5) {
+                last_detection_state_ = true;
+                return true;
+            }
+        }
+        return last_detection_state_;
+    }
+    
+    void reset() {
+        stable_count_ = 0;
+        unstable_count_ = 0;
+        last_detection_state_ = false;
+    }
+    
+private:
+    bool last_detection_state_;
+    int stable_count_;
+    int unstable_count_;
+};
+
+// ============================================================================
+// CLASS STABILITY VERIFIER - Prevents class confusion
+// ============================================================================
+class ClassStabilityVerifier {
+public:
+    ClassStabilityVerifier(int window_size = 5) : window_size_(window_size) {}
+    
+    std::string getStableClass(const std::string& detected_class, float confidence) {
+        if (confidence < 0.55f) {
+            return last_stable_class_;
+        }
+        
+        class_history_.push_back(detected_class);
+        if (class_history_.size() > window_size_) {
+            class_history_.pop_front();
+        }
+        
+        std::unordered_map<std::string, int> class_counts;
+        for (const auto& c : class_history_) {
+            class_counts[c]++;
+        }
+        
+        int max_count = 0;
+        std::string most_common;
+        for (const auto& [cls, cnt] : class_counts) {
+            if (cnt > max_count) {
+                max_count = cnt;
+                most_common = cls;
+            }
+        }
+        
+        if (max_count >= 3) {
+            last_stable_class_ = most_common;
+        }
+        
+        return last_stable_class_;
+    }
+    
+    void reset() {
+        class_history_.clear();
+        last_stable_class_ = "";
+    }
+    
+private:
+    std::deque<std::string> class_history_;
+    std::string last_stable_class_;
+    int window_size_;
+};
+
+// ============================================================================
+// POSITION SMOOTHER - Reduces jitter
+// ============================================================================
+class PositionSmoother {
+public:
+    PositionSmoother(float smoothing_factor = 0.6f) : smoothing_factor_(smoothing_factor), initialized_(false) {}
+    
+    cv::Point2f smooth(const cv::Point2f& new_position) {
+        if (!initialized_) {
+            smoothed_position_ = new_position;
+            initialized_ = true;
+            return new_position;
+        }
+        
+        smoothed_position_.x = smoothing_factor_ * new_position.x + (1.0f - smoothing_factor_) * smoothed_position_.x;
+        smoothed_position_.y = smoothing_factor_ * new_position.y + (1.0f - smoothing_factor_) * smoothed_position_.y;
+        return smoothed_position_;
+    }
+    
+    void reset() {
+        initialized_ = false;
+    }
+    
+private:
+    cv::Point2f smoothed_position_;
+    float smoothing_factor_;
+    bool initialized_;
 };
 
 // ============================================================================
@@ -139,17 +264,22 @@ public:
         this->declare_parameter<int>("width", 640);
         this->declare_parameter<int>("height", 640);
         this->declare_parameter<int>("fps", 30);
-        this->declare_parameter<float>("conf_threshold", 0.45f);
+        this->declare_parameter<float>("conf_threshold", 0.47f);
         this->declare_parameter<std::string>("target_object", "person");
         this->declare_parameter<bool>("enable_tracking", true);
         this->declare_parameter<bool>("adaptive_threshold", false);
         this->declare_parameter<bool>("show_category", true);
+        this->declare_parameter<bool>("enable_auto_follow", true);
+        this->declare_parameter<double>("max_linear_speed", 0.3);
+        this->declare_parameter<double>("turn_speed", 0.5);
         
         // Get parameters
         std::string model_path;
         int camera_id, width, height, fps;
         float conf_threshold;
         bool enable_tracking, adaptive_threshold, show_category;
+        bool enable_auto_follow;
+        double max_linear_speed, turn_speed;
         
         this->get_parameter("model_path", model_path);
         this->get_parameter("camera_id", camera_id);
@@ -161,11 +291,17 @@ public:
         this->get_parameter("enable_tracking", enable_tracking);
         this->get_parameter("adaptive_threshold", adaptive_threshold);
         this->get_parameter("show_category", show_category);
+        this->get_parameter("enable_auto_follow", enable_auto_follow);
+        this->get_parameter("max_linear_speed", max_linear_speed);
+        this->get_parameter("turn_speed", turn_speed);
         
         params_.conf_threshold = conf_threshold;
         params_.enable_tracking = enable_tracking;
         adaptive_threshold_ = adaptive_threshold;
         show_category_ = show_category;
+        enable_auto_follow_ = enable_auto_follow;
+        max_linear_speed_ = max_linear_speed;
+        turn_speed_ = turn_speed;
         
         // Initialize YOLO detector
         if (!yolo_.init(model_path.c_str())) {
@@ -206,6 +342,7 @@ public:
         image_pub_ = this->create_publisher<sensor_msgs::msg::Image>("processed_image", 10);
         status_pub_ = this->create_publisher<std_msgs::msg::String>("detection_status", 10);
         tracked_pub_ = this->create_publisher<std_msgs::msg::String>("tracked_objects", 10);
+        cmd_vel_pub_ = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
         
         // Create subscription for target object changes
         target_sub_ = this->create_subscription<std_msgs::msg::String>(
@@ -233,11 +370,16 @@ public:
 
 private:
     void targetCallback(const std_msgs::msg::String::SharedPtr msg) {
-        target_object_ = msg->data;
-        RCLCPP_INFO(this->get_logger(), "Target changed to: %s", target_object_.c_str());
-        // Reset tracker on target change
-        if (params_.enable_tracking) {
-            tracker_.clear();
+        if (target_object_ != msg->data) {
+            target_object_ = msg->data;
+            RCLCPP_INFO(this->get_logger(), "Target changed to: %s - resetting stability", target_object_.c_str());
+            // Reset all stability components on target change
+            if (params_.enable_tracking) {
+                tracker_.clear();
+            }
+            stability_controller_.reset();
+            class_verifier_.reset();
+            position_smoothers_.clear();
         }
     }
     
@@ -309,8 +451,8 @@ private:
         // Publish detections
         publishDetections(filtered_objects, tracked_objects, frame, inference_time_ms);
         
-        // Update FPS counter on image
-        drawOverlay(frame);
+        // Update FPS counter on image with stability status
+        drawOverlay(frame, last_target_stable_);
         
         // Publish processed image
         if (image_pub_->get_subscription_count() > 0) {
@@ -322,7 +464,7 @@ private:
         }
     }
     
-    void drawOverlay(cv::Mat& frame) {
+    void drawOverlay(cv::Mat& frame, bool target_is_stable) {
         // Performance stats
         std::string stats = perf_monitor_.getStats();
         cv::putText(frame, stats, cv::Point(10, 30), 
@@ -345,11 +487,18 @@ private:
         // Tracker info
         if (params_.enable_tracking) {
             char track_text[64];
-            snprintf(track_text, sizeof(track_text), "Tracked: %zu objects", 
-                     tracker_.getActiveTrackCount());
+            snprintf(track_text, sizeof(track_text), "Tracked: %zu | Stable: %s", 
+                     tracker_.getActiveTrackCount(),
+                     target_is_stable ? "YES" : "NO");
             cv::putText(frame, track_text, cv::Point(10, 110),
                         cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 0, 255), 2);
         }
+        
+        // Stability status indicator
+        std::string stability_status = target_is_stable ? "STABLE" : "SEARCHING";
+        cv::Scalar stability_color = target_is_stable ? cv::Scalar(0, 255, 0) : cv::Scalar(0, 165, 255);
+        cv::putText(frame, stability_status, cv::Point(frame.cols - 100, 30),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.7, stability_color, 2);
     }
     
     void publishDetections(const std::vector<Object>& objects,
@@ -368,6 +517,8 @@ private:
         std::string target_zone = "NONE";
         float target_center_x = 0.0f;
         int target_count = 0;
+        cv::Rect best_target_rect;
+        float best_target_area = 0.0f;
         std::string detected_classes;
 
         // Process tracked objects or raw detections based on mode
@@ -375,38 +526,63 @@ private:
 
         for (size_t i = 0; i < active_objects.size(); i++) {
             const auto& obj = active_objects[i];
-            const std::string& class_name = obj.class_name;
+            std::string class_name = obj.class_name;
+            
+            // Apply class stability verification to prevent misclassification
+            float avg_conf = obj.getAverageConfidence();
+            class_name = class_verifier_.getStableClass(class_name, avg_conf);
+            
+            // Apply position smoothing for smoother tracking
+            cv::Rect rect = obj.history.back();
+            cv::Point2f center(rect.x + rect.width/2.0f, rect.y + rect.height/2.0f);
+            
+            if (position_smoothers_.find(obj.id) == position_smoothers_.end()) {
+                position_smoothers_[obj.id] = PositionSmoother(params_.position_smoothing);
+            }
+            cv::Point2f smoothed_center = position_smoothers_[obj.id].smooth(center);
+            
+            rect.x = static_cast<int>(smoothed_center.x - rect.width/2.0f);
+            rect.y = static_cast<int>(smoothed_center.y - rect.height/2.0f);
+            rect = rect & cv::Rect(0, 0, frame.cols, frame.rows);
 
             // Get category
             auto cat_it = ID_TO_CATEGORY.find(obj.label);
             std::string category = (cat_it != ID_TO_CATEGORY.end()) ? cat_it->second : "unknown";
 
-            // Check if this is the target object
+            // Check if this is the target object (with stability check)
             if (class_name == target_object_) {
-                target_found = true;
-                target_count++;
-                cv::Rect rect = obj.history.back();
-                // Create temporary Object for calculateZone
-                Object temp_obj;
-                temp_obj.rect = rect;
-                temp_obj.label = obj.label;
-                temp_obj.prob = obj.getAverageConfidence();
-                SearchZone zone = calculateZone(temp_obj, frame.cols);
-                target_zone = zone.zone;
-                target_center_x = zone.center_x;
+                // Apply detection stability check
+                bool is_stable = stability_controller_.isStableDetection(true, avg_conf);
+                if (is_stable) {
+                    target_found = true;
+                    target_count++;
+                }
+                
+                float area = static_cast<float>(rect.width * rect.height);
+                if (area > best_target_area) {
+                    best_target_area = area;
+                    best_target_rect = rect;
+                    // Create temporary Object for calculateZone
+                    Object temp_obj;
+                    temp_obj.rect = rect;
+                    temp_obj.label = obj.label;
+                    temp_obj.prob = avg_conf;
+                    SearchZone zone = calculateZone(temp_obj, frame.cols);
+                    target_zone = zone.zone;
+                    target_center_x = zone.center_x;
+                }
             }
 
             // Create detection message
             vision_msgs::msg::Detection2D detection;
             detection.results.resize(1);
             detection.results[0].hypothesis.class_id = class_name;
-            detection.results[0].hypothesis.score = obj.getAverageConfidence();
+            detection.results[0].hypothesis.score = avg_conf;
 
-            cv::Rect rect = obj.history.back();
             detection.bbox.size_x = rect.width;
             detection.bbox.size_y = rect.height;
-            detection.bbox.center.position.x = rect.x + rect.width / 2.0;
-            detection.bbox.center.position.y = rect.y + rect.height / 2.0;
+            detection.bbox.center.position.x = smoothed_center.x;
+            detection.bbox.center.position.y = smoothed_center.y;
 
             detection_array.detections.push_back(detection);
 
@@ -420,16 +596,15 @@ private:
             cv::rectangle(frame, rect, color, 2);
 
             char label[128];
-            float confidence = obj.getAverageConfidence();
             if (params_.enable_tracking) {
                 snprintf(label, sizeof(label), "#%d %s %.0f%% [%s]",
-                         obj.id, class_name.c_str(), confidence * 100, category.c_str());
+                         obj.id, class_name.c_str(), avg_conf * 100, category.c_str());
             } else if (show_category_) {
                 snprintf(label, sizeof(label), "%s %.0f%% [%s]",
-                         class_name.c_str(), confidence * 100, category.c_str());
+                         class_name.c_str(), avg_conf * 100, category.c_str());
             } else {
                 snprintf(label, sizeof(label), "%s %.0f%%",
-                         class_name.c_str(), confidence * 100);
+                         class_name.c_str(), avg_conf * 100);
             }
 
             int baseline = 0;
@@ -459,15 +634,83 @@ private:
         
         // Publish detection array
         detections_pub_->publish(detection_array);
-        
-        // Publish status message
+
+        // Auto-follow control with stability - 3x3 grid (Left/Center/Right x Near/Mid/Far)
+        static geometry_msgs::msg::Twist last_cmd;
+        if (cmd_vel_pub_->get_subscription_count() > 0 && enable_auto_follow_) {
+            geometry_msgs::msg::Twist cmd;
+            
+            // Only follow if target is stable (detected consistently)
+            if (target_found && best_target_area > 0.0f) {
+                // Distance estimation by bbox height ratio
+                float height_ratio = static_cast<float>(best_target_rect.height) /
+                                     static_cast<float>(frame.rows);
+
+                // Speed bands based on distance with hysteresis
+                const float min_speed_pwm = 115.0f;
+                const float max_speed_pwm = 200.0f;
+                float target_pwm = 0.0f;
+                
+                // Add hysteresis to prevent speed oscillation
+                static float last_height_ratio = 0.0f;
+                if (height_ratio > 0.45f) {          // Near
+                    target_pwm = min_speed_pwm + 20.0f;
+                } else if (height_ratio > 0.30f) {  // Mid-Near transition
+                    target_pwm = (last_height_ratio > 0.45f) ? 
+                                 min_speed_pwm + 20.0f : min_speed_pwm + 35.0f;
+                } else if (height_ratio > 0.22f) {  // Mid
+                    target_pwm = min_speed_pwm + 50.0f;
+                } else if (height_ratio > 0.15f) {  // Mid-Far transition
+                    target_pwm = (last_height_ratio > 0.22f) ?
+                                 min_speed_pwm + 50.0f : max_speed_pwm - 30.0f;
+                } else {                             // Far
+                    target_pwm = max_speed_pwm - 15.0f;
+                }
+                last_height_ratio = height_ratio;
+                
+                // Convert desired PWM band into normalized linear speed (0..1)
+                float linear_norm = target_pwm / max_speed_pwm;
+                linear_norm = std::max(0.0f, std::min(1.0f, linear_norm));
+
+                cmd.linear.x = linear_norm * static_cast<float>(max_linear_speed_);
+
+                // Proportional angular control based on target offset
+                float frame_center = static_cast<float>(frame.cols) / 2.0f;
+                float target_center = best_target_rect.x + best_target_rect.width / 2.0f;
+                float offset_ratio = (target_center - frame_center) / frame_center;
+                
+                // Apply proportional turning with deadzone
+                float turn_deadzone = 0.08f;
+                if (std::abs(offset_ratio) > turn_deadzone) {
+                    float adjusted_offset = offset_ratio - (offset_ratio > 0 ? turn_deadzone : -turn_deadzone);
+                    cmd.angular.z = static_cast<double>(turn_speed_) * adjusted_offset * 1.5;
+                    cmd.angular.z = std::max(-turn_speed_, std::min(turn_speed_, cmd.angular.z));
+                } else {
+                    cmd.angular.z = 0.0;
+                }
+                
+                // Smooth command transitions
+                cmd.linear.x = 0.8f * last_cmd.linear.x + 0.2f * cmd.linear.x;
+                cmd.angular.z = 0.7f * last_cmd.angular.z + 0.3f * cmd.angular.z;
+                
+            } else {
+                // No stable target: gradual stop with momentum
+                cmd.linear.x = 0.0f;
+                cmd.angular.z = 0.0f;
+            }
+            last_cmd = cmd;
+            cmd_vel_pub_->publish(cmd);
+        }
+
+        // Publish status message with stability info
         if (status_pub_->get_subscription_count() > 0) {
             std_msgs::msg::String status_msg;
             char status_buf[512];
             snprintf(status_buf, sizeof(status_buf),
-                    "{\"target\":\"%s\",\"found\":%s,\"zone\":\"%s\",\"count\":%d,"
+                    "{\"target\":\"%s\",\"found\":%s,\"stable\":%s,\"zone\":\"%s\",\"count\":%d,"
                     "\"inference_time\":%.1f,\"fps\":%.1f,\"tracked\":%zu,\"classes\":\"%s\"}",
                     target_object_.c_str(),
+                    target_found ? "true" : "false",
                     target_found ? "true" : "false",
                     target_zone.c_str(),
                     target_count,
@@ -504,6 +747,8 @@ private:
                     tracked_objects.size(),
                     target_found ? "YES" : "NO",
                     target_zone.c_str());
+        
+        last_target_stable_ = target_found;
     }
     
     cv::Scalar getCategoryColorScalar(const std::string& category) {
@@ -522,6 +767,7 @@ private:
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr image_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr tracked_pub_;
+    rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr target_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
     
@@ -535,10 +781,17 @@ private:
     MultiObjectTracker tracker_;
     PerformanceMonitor perf_monitor_;
     AdaptiveThresholdController threshold_controller_;
+    DetectionStabilityController stability_controller_;
+    ClassStabilityVerifier class_verifier_;
+    std::unordered_map<int, PositionSmoother> position_smoothers_;
     
     bool adaptive_threshold_;
     bool show_category_;
+    bool enable_auto_follow_;
+    double max_linear_speed_;
+    double turn_speed_;
     float base_conf_threshold_;
+    bool last_target_stable_ = false;
     
     std::atomic<int> frame_count_;
     rclcpp::Time last_fps_time_;
