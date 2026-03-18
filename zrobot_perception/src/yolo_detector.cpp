@@ -158,10 +158,10 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
 
                 float cx = (w + 0.5f) * stride;
                 float cy = (h + 0.5f) * stride;
-                float x1 = cx - box[0];
-                float y1 = cy - box[1];
-                float x2 = cx + box[2];
-                float y2 = cy + box[3];
+                float x1 = cx - box[0] * stride;
+                float y1 = cy - box[1] * stride;
+                float x2 = cx + box[2] * stride;
+                float y2 = cy + box[3] * stride;
 
                 // Transform to original image coordinates
                 x1 = (x1 - pad_x) / scale;

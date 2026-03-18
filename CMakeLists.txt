@@ -23,6 +23,8 @@ add_subdirectory(zrobot_control)
 add_subdirectory(zrobot_interfaces)
 add_subdirectory(zrobot_bringup)
 add_subdirectory(web_interface)
+add_subdirectory(ldlidar_stl_ros2)
+add_subdirectory(zrobot_obstacle_avoidance)
 
 # Install launch and config files
 install(DIRECTORY

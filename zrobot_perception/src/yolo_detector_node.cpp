@@ -139,10 +139,10 @@ public:
         this->declare_parameter<int>("width", 640);
         this->declare_parameter<int>("height", 640);
         this->declare_parameter<int>("fps", 30);
-        this->declare_parameter<float>("conf_threshold", 0.25f);
+        this->declare_parameter<float>("conf_threshold", 0.45f);
         this->declare_parameter<std::string>("target_object", "person");
         this->declare_parameter<bool>("enable_tracking", true);
-        this->declare_parameter<bool>("adaptive_threshold", true);
+        this->declare_parameter<bool>("adaptive_threshold", false);
         this->declare_parameter<bool>("show_category", true);
         
         // Get parameters

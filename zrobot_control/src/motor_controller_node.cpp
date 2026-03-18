@@ -45,9 +45,9 @@ public:
             connect(uart_port, baud_rate);
         }
         
-        // Create subscription for velocity commands
+        // Create subscription for velocity commands (from obstacle avoidance)
         cmd_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
-            "cmd_vel", 10,
+            "cmd_vel_safe", 10,
             std::bind(&MotorControllerNode::cmdVelCallback, this, std::placeholders::_1)
         );
         

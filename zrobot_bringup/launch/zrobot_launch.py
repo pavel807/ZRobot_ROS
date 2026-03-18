@@ -33,7 +33,7 @@ def generate_launch_description():
 
     conf_threshold_arg = DeclareLaunchArgument(
         'conf_threshold',
-        default_value='0.3',
+        default_value='0.45',
         description='Confidence threshold for detection'
     )
 
@@ -63,6 +63,7 @@ def generate_launch_description():
                 'camera_id': LaunchConfiguration('camera_id'),
                 'conf_threshold': LaunchConfiguration('conf_threshold'),
                 'target_object': LaunchConfiguration('target_object'),
+                'adaptive_threshold': False,
             }
         ]
     )
@@ -93,6 +94,40 @@ def generate_launch_description():
         }]
     )
 
+    # LD Lidar Node
+    lidar_node = Node(
+        package='ldlidar_stl_ros2',
+        executable='ldlidar_stl_ros2_node',
+        name='ldlidar',
+        output='screen',
+        parameters=[{
+            'serial_port': '/dev/ttyUSB0',
+            'serial_baudrate': 115200,
+            'frame_id': 'laser_frame',
+            'inverted': False,
+            'angle_min': -3.14159,
+            'angle_max': 3.14159,
+            'range_min': 0.1,
+            'range_max': 30.0,
+            'scan_frequency': 10,
+        }]
+    )
+
+    # Obstacle Avoidance Node
+    obstacle_avoidance_node = Node(
+        package='zrobot_obstacle_avoidance',
+        executable='obstacle_avoidance_node.py',
+        name='obstacle_avoidance',
+        output='screen',
+        parameters=[{
+            'min_safe_distance': 0.3,
+            'slow_down_distance': 0.5,
+            'max_linear_speed': 0.3,
+            'turn_speed': 0.5,
+            'scan_angle_range': 60.0,
+        }]
+    )
+
     return LaunchDescription([
         model_path_arg,
         camera_id_arg,
@@ -102,4 +137,6 @@ def generate_launch_description():
         yolo_detector_node,
         motor_controller_node,
         web_interface_node,
+        lidar_node,
+        obstacle_avoidance_node,
     ])

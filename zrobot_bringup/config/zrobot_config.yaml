@@ -8,7 +8,7 @@ zrobot_perception:
     width: 640
     height: 640
     fps: 30
-    conf_threshold: 0.3
+    conf_threshold: 0.45
     target_object: "person"
 
 zrobot_control:
