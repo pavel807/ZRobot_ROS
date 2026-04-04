@@ -1,0 +1,14 @@
+{
+  "build": {
+    "base-paths": [
+      "zrobot_perception",
+      "zrobot_control",
+      "zrobot_interfaces",
+      "zrobot_bringup",
+      "web_interface",
+      "ldlidar_stl_ros2",
+      "zrobot_obstacle_avoidance"
+    ],
+    "symlink-install": true
+  }
+}
