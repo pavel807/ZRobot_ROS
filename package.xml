@@ -8,18 +8,13 @@
   <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
-  <buildtool_depend>ament_cmake_python</buildtool_depend>
 
-  <depend>rclcpp</depend>
-  <depend>rclpy</depend>
-  <depend>std_msgs</depend>
-  <depend>sensor_msgs</depend>
-  <depend>geometry_msgs</depend>
-  <depend>vision_msgs</depend>
-  <depend>cv_bridge</depend>
-  <depend>opencv</depend>
-  <depend>image_transport</depend>
-  <depend>libopencv-dev</depend>
+  <exec_depend>zrobot_bringup</exec_depend>
+  <exec_depend>zrobot_control</exec_depend>
+  <exec_depend>zrobot_perception</exec_depend>
+  <exec_depend>zrobot_obstacle_avoidance</exec_depend>
+  <exec_depend>web_interface</exec_depend>
+  <exec_depend>ldlidar_stl_ros2</exec_depend>
 
   <test_depend>ament_lint_auto</test_depend>
   <test_depend>ament_lint_common</test_depend>
