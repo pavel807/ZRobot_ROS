@@ -17,12 +17,7 @@ find_package(std_msgs REQUIRED)
 install(PROGRAMS
   src/obstacle_avoidance_node.py
   DESTINATION lib/${PROJECT_NAME}
-)
-
-# Install launch files if they exist
-install(DIRECTORY launch/
-  DESTINATION share/${PROJECT_NAME}/launch
-  OPTIONAL
+  RENAME obstacle_avoidance_node
 )
 
 ament_package()
