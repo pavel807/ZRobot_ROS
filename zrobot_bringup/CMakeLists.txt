@@ -9,4 +9,10 @@ install(DIRECTORY
   DESTINATION share/${PROJECT_NAME}/
 )
 
+install(
+  PROGRAMS
+  launch/zrobot_launch.py
+  DESTINATION lib/${PROJECT_NAME}/
+)
+
 ament_package()
