@@ -29,7 +29,7 @@ add_subdirectory(ldlidar_stl_ros2)
 # Install obstacle avoidance Python node directly
 install(PROGRAMS
   zrobot_obstacle_avoidance/src/obstacle_avoidance_node.py
-  DESTINATION lib/zrobot_obstacle_avoidance
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 # Install launch and config files

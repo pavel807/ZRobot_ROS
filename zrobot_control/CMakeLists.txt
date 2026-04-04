@@ -25,7 +25,7 @@ ament_target_dependencies(motor_controller_node
 
 install(TARGETS
   motor_controller_node
-  DESTINATION lib/${PROJECT_NAME}
+  DESTINATION lib/zrobot
 )
 
 ament_package()

@@ -83,7 +83,7 @@ def generate_launch_description():
 
         # YOLO Detector Node
         Node(
-            package='zrobot_perception',
+            package='zrobot',
             executable='yolo_detector_node',
             name='yolo_detector',
             output='screen',
@@ -102,7 +102,7 @@ def generate_launch_description():
 
         # Motor Controller Node (Arduino)
         Node(
-            package='zrobot_control',
+            package='zrobot',
             executable='motor_controller_node',
             name='motor_controller',
             output='screen',
@@ -119,7 +119,7 @@ def generate_launch_description():
 
         # Web Interface Node
         Node(
-            package='web_interface',
+            package='zrobot',
             executable='web_server',
             name='web_interface',
             output='screen',
@@ -131,7 +131,7 @@ def generate_launch_description():
 
         # LD Lidar Node (LD19)
         Node(
-            package='ldlidar_stl_ros2',
+            package='zrobot',
             executable='ldlidar_stl_ros2_node',
             name='ldlidar',
             output='screen',
@@ -150,7 +150,7 @@ def generate_launch_description():
 
         # Obstacle Avoidance Node
         Node(
-            package='zrobot_obstacle_avoidance',
+            package='zrobot',
             executable='obstacle_avoidance_node.py',
             name='obstacle_avoidance',
             output='screen',
