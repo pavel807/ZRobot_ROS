@@ -140,7 +140,7 @@ std::vector<SearchResult> findMatchingClasses(const std::string& query) {
         std::sort(distances.begin(), distances.end());
 
         int max_suggestions = 5;
-        for (size_t i = 0; i < distances.size() && i < max_suggestions; ++i) {
+        for (size_t i = 0; i < distances.size() && i < static_cast<size_t>(max_suggestions); ++i) {
             int dist = distances[i].first;
             int idx = distances[i].second;
             std::string type = "похоже (ошибка в " + std::to_string(dist) + " симв.)";

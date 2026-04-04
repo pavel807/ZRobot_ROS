@@ -68,6 +68,7 @@ float YOLOv8RKNN::sigmoid(float x) const {
 
 bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
                        float conf_thresh, float nms_thresh) const {
+    (void)nms_thresh; // Currently not used, NMS is handled internally
     int input_w = 640, input_h = 640;
     float scale = std::min((float)input_w / img.cols, (float)input_h / img.rows);
     int new_w = img.cols * scale;

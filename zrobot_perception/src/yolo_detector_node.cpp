@@ -25,15 +25,6 @@
 #include "coco_classes.h"
 #include "object_tracker.h"
 
-// Keep COCO_NAMES for backward compatibility
-const std::vector<std::string> COCO_NAMES = []() {
-    std::vector<std::string> names;
-    for (const auto& cls : COCO_CLASSES) {
-        names.push_back(cls.name);
-    }
-    return names;
-}();
-
 // ============================================================================
 // DETECTION PARAMETERS — синхронизировано с оригиналом ZRobot v6.3
 // ============================================================================
@@ -59,16 +50,16 @@ struct DetectionParams {
 // MOTOR CONTROL PARAMETERS — полностью синхронизировано с оригиналом ZRobot
 // ============================================================================
 struct MotorControlParams {
-    int max_speed = 245;                     // Как в оригинале
-    int min_speed = 165;                     // Как в оригинале
-    int tracking_speed = 220;                // Как в оригинале
-    int search_speed = 115;                  // Как в оригинале
-    float center_threshold = 0.08f;          // Как в оригинале
-    float max_turn_ratio = 0.95f;            // Как в оригинале
-    int approach_width = 120;                // Как в оригинале
-    int search_timeout_ms = 300;             // Как в оригинале
-    int search_hysteresis_ms = 400;          // Как в оригинале
-    int speed_smoothing_steps = 4;           // Как в оригинале
+    std::atomic<int> max_speed{245};                     // Как в оригинале
+    std::atomic<int> min_speed{165};                     // Как в оригинале
+    std::atomic<int> tracking_speed{220};                // Как в оригинале
+    std::atomic<int> search_speed{115};                  // Как в оригинале
+    std::atomic<float> center_threshold{0.08f};          // Как в оригинале
+    std::atomic<float> max_turn_ratio{0.95f};            // Как в оригинале
+    std::atomic<int> approach_width{120};                // Как в оригинале
+    std::atomic<int> search_timeout_ms{300};             // Как в оригинале
+    std::atomic<int> search_hysteresis_ms{400};          // Как в оригинале
+    std::atomic<int> speed_smoothing_steps{4};           // Как в оригинале
 };
 
 // ============================================================================
@@ -232,7 +223,7 @@ public:
 private:
     std::deque<std::string> class_history_;
     std::string last_stable_class_;
-    int window_size_;
+    size_t window_size_;
 };
 
 // ============================================================================
