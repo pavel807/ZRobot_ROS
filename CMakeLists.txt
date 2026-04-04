@@ -24,7 +24,13 @@ add_subdirectory(zrobot_interfaces)
 add_subdirectory(zrobot_bringup)
 add_subdirectory(web_interface)
 add_subdirectory(ldlidar_stl_ros2)
-add_subdirectory(zrobot_obstacle_avoidance)
+# Note: zrobot_obstacle_avoidance is installed directly below (subdirectory CMakeLists doesn't work with add_subdirectory)
+
+# Install obstacle avoidance Python node directly
+install(PROGRAMS
+  zrobot_obstacle_avoidance/src/obstacle_avoidance_node.py
+  DESTINATION lib/zrobot_obstacle_avoidance
+)
 
 # Install launch and config files
 install(DIRECTORY
