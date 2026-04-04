@@ -1,0 +1,2 @@
+# This file tells colcon to skip this directory as a package
+# and recurse into subdirectories to find them independently

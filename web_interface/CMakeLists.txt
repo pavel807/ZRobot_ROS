@@ -7,12 +7,12 @@ find_package(rclpy REQUIRED)
 
 install(PROGRAMS
   src/web_server.py
-  DESTINATION lib/zrobot
+  DESTINATION lib/${PROJECT_NAME}
   RENAME web_server
 )
 
 install(DIRECTORY
-  DESTINATION share/zrobot
+  DESTINATION share/${PROJECT_NAME}
 )
 
 ament_package()

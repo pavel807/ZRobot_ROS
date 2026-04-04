@@ -63,11 +63,11 @@ target_link_libraries(${PROJECT_NAME}_node pthread)
 
 # Install
 install(TARGETS ${PROJECT_NAME}_node
-  DESTINATION lib/zrobot
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 install(DIRECTORY launch rviz2
-  DESTINATION share/zrobot/
+  DESTINATION share/${PROJECT_NAME}/
 )
 
 

@@ -50,7 +50,7 @@ target_link_libraries(yolo_detector_node
 
 install(TARGETS
   yolo_detector_node
-  DESTINATION lib/zrobot
+  DESTINATION lib/${PROJECT_NAME}
 )
 
 ament_package()
