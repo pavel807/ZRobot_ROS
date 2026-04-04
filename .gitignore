@@ -42,6 +42,3 @@ models/
 # Configuration overrides
 *.yaml.local
 core
-build/
-install/
-log/
