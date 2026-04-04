@@ -13,9 +13,16 @@ find_package(sensor_msgs REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 
+# Install Python executables (nodes)
 install(PROGRAMS
   src/obstacle_avoidance_node.py
   DESTINATION lib/${PROJECT_NAME}
+)
+
+# Install launch files if they exist
+install(DIRECTORY launch/
+  DESTINATION share/${PROJECT_NAME}/launch
+  OPTIONAL
 )
 
 ament_package()

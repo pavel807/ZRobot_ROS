@@ -146,7 +146,7 @@ def generate_launch_description():
             # Obstacle Avoidance Node
             Node(
                 package="zrobot_obstacle_avoidance",
-                executable="obstacle_avoidance_node.py",
+                executable="obstacle_avoidance_node",
                 name="obstacle_avoidance",
                 output="screen",
                 parameters=[
