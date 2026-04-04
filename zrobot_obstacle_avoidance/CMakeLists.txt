@@ -18,4 +18,6 @@ install(PROGRAMS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+ament_python_install_package(${PROJECT_NAME})
+
 ament_package()
