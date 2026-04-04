@@ -6,6 +6,8 @@
 #include <termios.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/ioctl.h>
+#include <linux/serial.h>
 #include <cstring>
 #include <string>
 #include <memory>
@@ -21,9 +23,9 @@ public:
     MotorControllerNode() : Node("motor_controller") {
         // Declare parameters
         this->declare_parameter<std::string>("uart_port", "/dev/ttyACM0");
-        this->declare_parameter<int>("baud_rate", 115200);
-        this->declare_parameter<int>("max_speed", 245);
-        this->declare_parameter<int>("min_speed", 165);
+        this->declare_parameter<int>("baud_rate", 115200);        // Твоё железо: 115200
+        this->declare_parameter<int>("max_speed", 245);           // ИСПРАВЛЕНО: было произвольное → 245
+        this->declare_parameter<int>("min_speed", 165);           // ИСПРАВЛЕНО: было произвольное → 165
         this->declare_parameter<bool>("enabled", true);
         
         // Get parameters
@@ -108,6 +110,32 @@ private:
             return false;
         }
 
+        // ============================================================
+        // DTR/RTS сброс — ПЕРЕЗАГРУЗКА ARDUINO (как делает minicom)
+        // Arduino на USB-CDC ACM ждёт сброса DTR для инициализации
+        // ============================================================
+        RCLCPP_INFO(this->get_logger(), "Resetting Arduino (DTR/RTS toggle)...");
+
+        // Опускаем DTR и RTS (сброс → Arduino перезагружается)
+        int dtr_flag = TIOCM_DTR;
+        ioctl(serial_fd_, TIOCMBIC, &dtr_flag);
+
+        int rts_flag = TIOCM_RTS;
+        ioctl(serial_fd_, TIOCMBIC, &rts_flag);
+
+        // Ждём 250ms — Arduino успевает уйти в reset
+        usleep(250000);
+
+        // Поднимаем DTR обратно (Arduino запускается)
+        ioctl(serial_fd_, TIOCMBIS, &dtr_flag);
+
+        // Ждём 2 секунды — полная инициализация Arduino + USB CDC
+        RCLCPP_INFO(this->get_logger(), "Waiting for Arduino initialization (2s)...");
+        usleep(2000000);
+
+        // ============================================================
+        // Настройка termios (как в оригинале ZRobot)
+        // ============================================================
         struct termios tty;
         memset(&tty, 0, sizeof(tty));
         if (tcgetattr(serial_fd_, &tty) != 0) {
@@ -117,37 +145,38 @@ private:
             connected_.store(false);
             return false;
         }
-        
+
         speed_t baud = B115200;
         if (baud_rate == 115200) baud = B115200;
         else if (baud_rate == 57600) baud = B57600;
         else if (baud_rate == 19200) baud = B19200;
-        
+        else if (baud_rate == 9600) baud = B9600;
+
         cfsetospeed(&tty, baud);
         cfsetispeed(&tty, baud);
-        
+
         tty.c_cflag &= ~PARENB;
         tty.c_cflag &= ~CSTOPB;
         tty.c_cflag &= ~CSIZE;
         tty.c_cflag |= CS8;
         tty.c_cflag |= CREAD | CLOCAL;
-        
+
         tty.c_lflag &= ~ICANON;
         tty.c_lflag &= ~ECHO;
         tty.c_lflag &= ~ECHOE;
         tty.c_lflag &= ~ECHONL;
         tty.c_lflag &= ~ISIG;
-        
+
         tty.c_iflag &= ~(IXON | IXOFF | IXANY);
         tty.c_iflag &= ~(IGNBRK|BRKINT|PARMRK|ISTRIP|INLCR|IGNCR|ICRNL);
-        
+
         tty.c_oflag &= ~OPOST;
         tty.c_oflag &= ~ONLCR;
-        
+
         tty.c_cc[VMIN] = 0;
         // 0.1s read timeout (tenths of a second)
         tty.c_cc[VTIME] = 1;
-        
+
         if (tcsetattr(serial_fd_, TCSANOW, &tty) != 0) {
             RCLCPP_ERROR(this->get_logger(), "Error from tcsetattr: %s", strerror(errno));
             close(serial_fd_);
@@ -155,18 +184,23 @@ private:
             connected_.store(false);
             return false;
         }
-        
+
+        // Очищаем буферы
         tcflush(serial_fd_, TCIOFLUSH);
-        
+
         connected_.store(true);
         RCLCPP_INFO(this->get_logger(), "Connected to %s @ %d baud", port.c_str(), baud_rate);
 
+        // Запускаем RX поток
         startRxThread();
 
-        // Stop motors on startup
+        // Небольшая задержка перед первой командой
         usleep(100000);
+
+        // Останавливаем моторы при старте (гарантия безопасности)
         setMotors(0, 0);
 
+        RCLCPP_INFO(this->get_logger(), "Arduino ready — motors stopped, awaiting commands");
         return true;
     }
 

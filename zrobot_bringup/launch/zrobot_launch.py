@@ -31,12 +31,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'model_path',
             default_value='models/yolov8s.rknn',
-            description='Path to YOLO RKNN model'
+            description='Path to YOLO RKNN model (yolov8s — баланс точности/скорости)'
         ),
         DeclareLaunchArgument(
             'camera_id',
             default_value='1',
-            description='Camera device ID'
+            description='Camera device ID (1 = твоя камера)'
         ),
         DeclareLaunchArgument(
             'uart_port',
@@ -46,17 +46,37 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'baud_rate',
             default_value='115200',
-            description='Baud rate for Arduino'
+            description='Baud rate for Arduino (115200 — твоя конфигурация)'
         ),
         DeclareLaunchArgument(
             'conf_threshold',
-            default_value='0.45',
-            description='Confidence threshold for detection'
+            default_value='0.30',
+            description='Confidence threshold for detection (0.30 как в оригинале)'
         ),
         DeclareLaunchArgument(
             'target_object',
             default_value='person',
             description='Target object to track'
+        ),
+        DeclareLaunchArgument(
+            'max_speed',
+            default_value='245',
+            description='Maximum motor speed (245 как в оригинале)'
+        ),
+        DeclareLaunchArgument(
+            'min_speed',
+            default_value='165',
+            description='Minimum motor speed threshold (165 как в оригинале)'
+        ),
+        DeclareLaunchArgument(
+            'max_linear_speed',
+            default_value='0.3',
+            description='Maximum linear speed for auto-follow'
+        ),
+        DeclareLaunchArgument(
+            'turn_speed',
+            default_value='0.5',
+            description='Turn speed for auto-follow'
         ),
 
         # --- 3. Узлы (Nodes) ---
@@ -74,6 +94,8 @@ def generate_launch_description():
                     'camera_id': LaunchConfiguration('camera_id'),
                     'conf_threshold': LaunchConfiguration('conf_threshold'),
                     'target_object': LaunchConfiguration('target_object'),
+                    'max_linear_speed': LaunchConfiguration('max_linear_speed'),
+                    'turn_speed': LaunchConfiguration('turn_speed'),
                 }
             ]
         ),
@@ -89,6 +111,8 @@ def generate_launch_description():
                 {
                     'uart_port': LaunchConfiguration('uart_port'),
                     'baud_rate': LaunchConfiguration('baud_rate'),
+                    'max_speed': LaunchConfiguration('max_speed'),
+                    'min_speed': LaunchConfiguration('min_speed'),
                 }
             ]
         ),

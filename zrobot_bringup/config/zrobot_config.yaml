@@ -1,20 +1,31 @@
 # ZRobot Configuration
-# ROS2 version
+# ROS2 version — синхронизировано с оригиналом ZRobot v6.3
 
 zrobot_perception:
   ros__parameters:
+    # Модель — yolov8s (баланс точности/скорости)
     model_path: "models/yolov8s.rknn"
     camera_id: 1
     width: 640
     height: 640
     fps: 30
-    conf_threshold: 0.45
+    # Порог уверенности
+    conf_threshold: 0.30
     target_object: "person"
+    # Дополнительные параметры
+    enable_tracking: true
+    adaptive_threshold: false
+    show_category: true
+    enable_auto_follow: true
+    max_linear_speed: 0.3
+    turn_speed: 0.5
 
 zrobot_control:
   ros__parameters:
+    # UART — Arduino на 115200
     uart_port: "/dev/ttyACM0"
-    baud_rate: 9600
-    max_speed: 200
-    min_speed: 115
+    baud_rate: 115200
+    # Скорости моторов — КАК В ОРИГИНАЛЕ
+    max_speed: 245
+    min_speed: 165
     enabled: true
