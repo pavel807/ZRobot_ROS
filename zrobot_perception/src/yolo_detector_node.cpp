@@ -4,6 +4,7 @@
 #include <geometry_msgs/msg/point.hpp>
 #include <geometry_msgs/msg/twist.hpp>
 #include <std_msgs/msg/string.hpp>
+#include <std_msgs/msg/float32.hpp>
 #include <cv_bridge/cv_bridge/cv_bridge.hpp>
 #include <opencv2/opencv.hpp>
 #include <memory>
@@ -357,6 +358,12 @@ public:
             std::bind(&YoloDetectorNode::targetCallback, this, std::placeholders::_1)
         );
 
+        // Create subscription for confidence threshold changes
+        confidence_sub_ = this->create_subscription<std_msgs::msg::Float32>(
+            "set_confidence", 10,
+            std::bind(&YoloDetectorNode::confidenceCallback, this, std::placeholders::_1)
+        );
+
         // Create timer for detection loop
         timer_ = this->create_wall_timer(
             std::chrono::milliseconds(1000 / fps),
@@ -412,6 +419,19 @@ private:
             search_direction_ = 1;
             speed_history_l_.clear();
             speed_history_r_.clear();
+        }
+    }
+
+    void confidenceCallback(const std_msgs::msg::Float32::SharedPtr msg) {
+        float new_confidence = msg->data;
+        if (new_confidence >= 0.0f && new_confidence <= 1.0f) {
+            float old_confidence = params_.conf_threshold;
+            params_.conf_threshold = new_confidence;
+            base_conf_threshold_ = new_confidence;
+            RCLCPP_INFO(this->get_logger(), "Confidence threshold changed: %.2f -> %.2f", 
+                        old_confidence, new_confidence);
+        } else {
+            RCLCPP_WARN(this->get_logger(), "Invalid confidence value: %.2f (must be 0.0-1.0)", new_confidence);
         }
     }
 
@@ -660,6 +680,7 @@ private:
         bool target_found = false;
         std::string target_zone = "NONE";
         float target_center_x = 0.0f;
+        float target_confidence = 0.0f;  // Confidence целевого объекта
         int target_count = 0;
         cv::Rect best_target_rect;
         float best_target_area = 0.0f;
@@ -702,6 +723,7 @@ private:
                     best_target_area = area;
                     best_target_rect = rect;
                     best_target_width = rect.width;
+                    target_confidence = avg_conf;  // Сохраняем confidence
 
                     Object temp_obj;
                     temp_obj.rect = rect;
@@ -893,11 +915,11 @@ private:
         // Publish status message
         if (status_pub_->get_subscription_count() > 0) {
             std_msgs::msg::String status_msg;
-            char status_buf[512];
+            char status_buf[600];
             snprintf(status_buf, sizeof(status_buf),
                     "{\"target\":\"%s\",\"found\":%s,\"stable\":%s,\"zone\":\"%s\",\"count\":%d,"
                     "\"inference_time\":%.1f,\"fps\":%.1f,\"tracked\":%zu,\"classes\":\"%s\","
-                    "\"searching\":%s,\"search_dir\":\"%s\"}",
+                    "\"searching\":%s,\"search_dir\":\"%s\",\"confidence\":%.2f,\"threshold\":%.2f}",
                     target_object_.c_str(),
                     target_found ? "true" : "false",
                     target_found ? "true" : "false",
@@ -908,7 +930,9 @@ private:
                     tracked_objects.size(),
                     detected_classes.c_str(),
                     in_search_mode_ ? "true" : "false",
-                    search_direction_ > 0 ? "RIGHT" : "LEFT");
+                    search_direction_ > 0 ? "RIGHT" : "LEFT",
+                    target_confidence,
+                    params_.conf_threshold);
             status_msg.data = status_buf;
             status_pub_->publish(status_msg);
         }
@@ -961,6 +985,7 @@ private:
     rclcpp::Publisher<std_msgs::msg::String>::SharedPtr tracked_pub_;
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub_;
     rclcpp::Subscription<std_msgs::msg::String>::SharedPtr target_sub_;
+    rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr confidence_sub_;
     rclcpp::TimerBase::SharedPtr timer_;
 
     // YOLO and camera

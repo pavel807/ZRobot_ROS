@@ -26,6 +26,7 @@ class ObstacleAvoidanceNode(Node):
         self.declare_parameter('scan_angle_range', 60.0)
         self.declare_parameter('front_offset', 0.205)
         self.declare_parameter('scan_timeout_sec', 1.0)
+        self.declare_parameter('search_delay_sec', 2.0)  # Задержка перед началом поиска
 
         self.enabled = bool(self.get_parameter('enabled').value)
         self.min_safe_distance = self.get_parameter('min_safe_distance').value
@@ -35,6 +36,7 @@ class ObstacleAvoidanceNode(Node):
         self.scan_angle_range = float(self.get_parameter('scan_angle_range').value)
         self.front_offset = self.get_parameter('front_offset').value
         self.scan_timeout_sec = float(self.get_parameter('scan_timeout_sec').value)
+        self.search_delay_sec = float(self.get_parameter('search_delay_sec').value)
 
         self.cmd_vel_sub = self.create_subscription(
             Twist,
@@ -72,6 +74,14 @@ class ObstacleAvoidanceNode(Node):
         self.current_cmd = Twist()
         self.target_in_view = False
         self.target_zone = 'NONE'
+        self.target_last_seen_zone = 'NONE'  # Зона где последний раз видели объект
+        self.target_last_seen_time = self.get_clock().now()  # Время когда последний раз видели
+        self.target_last_confidence = 0.0  # Последний confidence
+        self.was_target_seen = False  # Был ли объект когда-либо виден
+        self.search_start_time = self.get_clock().now()
+        self.is_searching = False
+        self.search_direction = 0  # -1 = влево, 1 = вправо, 0 = не определено
+        self.search_delay_timer = self.get_clock().now()
         self.last_scan_time = self.get_clock().now()
         self.min_lidar_distance = 999.0
         self._scan_stamps = deque(maxlen=30)
@@ -100,6 +110,17 @@ class ObstacleAvoidanceNode(Node):
             data = json.loads(msg.data)
             self.target_in_view = data.get('found', False)
             self.target_zone = data.get('zone', 'NONE')
+            
+            # Сохраняем последний confidence (всегда, даже если объект не найден)
+            self.target_last_confidence = data.get('confidence', 0.0)
+            
+            # Сохраняем последнее местоположение когда объект виден
+            if self.target_in_view:
+                self.target_last_seen_zone = self.target_zone
+                self.target_last_seen_time = self.get_clock().now()
+                self.was_target_seen = True
+                # Сбрасываем поиск когда объект виден
+                self.is_searching = False
         except:
             pass
 
@@ -218,8 +239,12 @@ class ObstacleAvoidanceNode(Node):
         if min_front < self.min_safe_distance:
             output_cmd.linear.x = 0.0
             output_cmd.angular.z = 0.0
-            
+
+            # Логика поиска/поворота к последнему местоположению
+            now = self.get_clock().now()
+
             if self.target_in_view:
+                # Объект виден — поворачиваемся к нему
                 if self.target_zone == 'LEFT':
                     output_cmd.angular.z = self.turn_speed
                 elif self.target_zone == 'RIGHT':
@@ -231,7 +256,48 @@ class ObstacleAvoidanceNode(Node):
                         output_cmd.angular.z = -self.turn_speed
                 else:
                     output_cmd.angular.z = -self.turn_speed
+                self.is_searching = False
+            elif self.was_target_seen and not self.is_searching:
+                # Объект был виден но сейчас не виден — проверяем confidence
+                if self.target_last_confidence >= 0.48:
+                    # Confidence был высокий — поворачиваемся к последнему местоположению
+                    elapsed = (now - self.target_last_seen_time).nanoseconds / 1e9
+                    
+                    if elapsed < self.search_delay_sec:
+                        # Ещё ждём перед началом поиска
+                        output_cmd.angular.z = 0.0
+                    else:
+                        # Начинаем поиск — поворачиваемся к последнему местоположению
+                        self.is_searching = True
+                        self.search_start_time = now
+                        
+                        if self.target_last_seen_zone == 'LEFT':
+                            self.search_direction = -1  # Влево
+                        elif self.target_last_seen_zone == 'RIGHT':
+                            self.search_direction = 1  # Вправо
+                        else:
+                            # Зона неизвестна — выбираем направление по расстоянию
+                            self.search_direction = -1 if min_left > min_right else 1
+                        
+                        output_cmd.angular.z = self.turn_speed * self.search_direction
+                else:
+                    # Confidence был низкий — обычный обход препятствий
+                    if min_left > min_right:
+                        output_cmd.angular.z = self.turn_speed
+                    else:
+                        output_cmd.angular.z = -self.turn_speed
+            elif self.was_target_seen and self.is_searching:
+                # Уже в режиме поиска — продолжаем искать
+                elapsed = (now - self.search_start_time).nanoseconds / 1e9
+                
+                # Меняем направление каждые 2 секунды
+                if elapsed > 2.0:
+                    self.search_direction *= -1
+                    self.search_start_time = now
+                
+                output_cmd.angular.z = self.turn_speed * self.search_direction
             else:
+                # Объект никогда не был виден — обычный обход
                 if min_left > min_right:
                     output_cmd.angular.z = self.turn_speed
                 else:
