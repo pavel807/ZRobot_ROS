@@ -15,6 +15,10 @@ zrobot_perception:
   enable_auto_follow: true
   max_linear_speed: 0.3
   turn_speed: 0.5
+  # NMS parameters
+  nms_sigma: 0.5
+  iou_threshold: 0.45
+  multi_label_threshold: 0.15
 
 zrobot_control:
   uart_port: "/dev/ttyACM0"

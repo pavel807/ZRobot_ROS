@@ -280,6 +280,9 @@ public:
         this->declare_parameter<bool>("enable_auto_follow", true);
         this->declare_parameter<double>("max_linear_speed", 0.3);
         this->declare_parameter<double>("turn_speed", 0.5);
+        this->declare_parameter<double>("nms_sigma", 0.5);
+        this->declare_parameter<double>("iou_threshold", 0.45);
+        this->declare_parameter<double>("multi_label_threshold", 0.15);
 
         // Get parameters
         std::string model_path;
@@ -288,6 +291,7 @@ public:
         bool enable_tracking, adaptive_threshold, show_category;
         bool enable_auto_follow;
         double max_linear_speed, turn_speed;
+        double nms_sigma, iou_threshold, multi_label_threshold;
 
         this->get_parameter("model_path", model_path);
         this->get_parameter("camera_id", camera_id);
@@ -302,6 +306,9 @@ public:
         this->get_parameter("enable_auto_follow", enable_auto_follow);
         this->get_parameter("max_linear_speed", max_linear_speed);
         this->get_parameter("turn_speed", turn_speed);
+        this->get_parameter("nms_sigma", nms_sigma);
+        this->get_parameter("iou_threshold", iou_threshold);
+        this->get_parameter("multi_label_threshold", multi_label_threshold);
 
         params_.conf_threshold = conf_threshold;
         params_.enable_tracking = enable_tracking;
@@ -310,6 +317,9 @@ public:
         enable_auto_follow_ = enable_auto_follow;
         max_linear_speed_ = max_linear_speed;
         turn_speed_ = turn_speed;
+
+        yolo_.set_nms_params(nms_sigma, iou_threshold);
+        yolo_.set_multi_label_threshold(multi_label_threshold);
 
         // Initialize YOLO detector
         if (!yolo_.init(model_path.c_str())) {
@@ -752,7 +762,7 @@ private:
                 color = cv::Scalar(0, 0, 255);
             }
 
-            cv::rectangle(frame, rect, color, 2);
+            cv::rectangle(frame, rect, color, 1);
 
             char label[128];
             if (params_.enable_tracking) {

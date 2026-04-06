@@ -5,7 +5,6 @@
 #include <cstring>
 #include <cmath>
 
-// Move constructor
 YOLOv8RKNN::YOLOv8RKNN(YOLOv8RKNN&& other) noexcept
     : ctx(other.ctx)
     , io_num(other.io_num)
@@ -17,7 +16,6 @@ YOLOv8RKNN::YOLOv8RKNN(YOLOv8RKNN&& other) noexcept
     other.ctx = 0;
 }
 
-// Move assignment
 YOLOv8RKNN& YOLOv8RKNN::operator=(YOLOv8RKNN&& other) noexcept {
     if (this != &other) {
         if (ctx) {
@@ -49,7 +47,6 @@ bool YOLOv8RKNN::init(const char* model_path) {
         rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &output_attrs[i], sizeof(rknn_tensor_attr));
     }
 
-    // Use all NPU cores on RK3588
     rknn_set_core_mask(ctx, RKNN_NPU_CORE_0_1_2);
     
     std::cout << GREEN << "[YOLO] Model initialized: " << model_path << RESET << std::endl;
@@ -66,9 +63,156 @@ float YOLOv8RKNN::sigmoid(float x) const {
     return 1.0f / (1.0f + fast_exp(-x));
 }
 
+float YOLOv8RKNN::calculate_iou(const Object& a, const Object& b) const {
+    float x1 = std::max(a.rect.x, b.rect.x);
+    float y1 = std::max(a.rect.y, b.rect.y);
+    float x2 = std::min(a.rect.x + a.rect.width, b.rect.x + b.rect.width);
+    float y2 = std::min(a.rect.y + a.rect.height, b.rect.y + b.rect.height);
+
+    if (x2 < x1 || y2 < y1) return 0.0f;
+
+    float intersection = (x2 - x1) * (y2 - y1);
+    float union_area = a.rect.width * a.rect.height + b.rect.width * b.rect.height - intersection;
+    
+    return union_area > 0 ? intersection / union_area : 0.0f;
+}
+
+float YOLOv8RKNN::calculate_diou(const Object& a, const Object& b) const {
+    float iou = calculate_iou(a, b);
+    
+    float cx1 = a.cx(), cy1 = a.cy();
+    float cx2 = b.cx(), cy2 = b.cy();
+    
+    float center_dist_sq = (cx1 - cx2) * (cx1 - cx2) + (cy1 - cy2) * (cy1 - cy2);
+    
+    float enclosed_x1 = std::min(a.rect.x, b.rect.x);
+    float enclosed_y1 = std::min(a.rect.y, b.rect.y);
+    float enclosed_x2 = std::max(a.rect.x + a.rect.width, b.rect.x + b.rect.width);
+    float enclosed_y2 = std::max(a.rect.y + a.rect.height, b.rect.y + b.rect.height);
+    
+    float diag_dist_sq = (enclosed_x2 - enclosed_x1) * (enclosed_x2 - enclosed_x1) + 
+                         (enclosed_y2 - enclosed_y1) * (enclosed_y2 - enclosed_y1);
+    
+    if (diag_dist_sq <= 0) return iou;
+    
+    float diou = iou - center_dist_sq / diag_dist_sq;
+    return std::max(0.0f, std::min(1.0f, diou));
+}
+
+void YOLOv8RKNN::soft_nms(std::vector<Object>& objects) const {
+    if (objects.size() < 2) return;
+
+    std::sort(objects.begin(), objects.end(),
+              [](const Object& a, const Object& b) { return a.prob > b.prob; });
+
+    std::vector<Object> result;
+    std::vector<float> scores(objects.size());
+    
+    for (size_t i = 0; i < objects.size(); i++) {
+        scores[i] = objects[i].prob;
+    }
+
+    while (!objects.empty()) {
+        size_t max_idx = 0;
+        float max_score = objects[0].prob;
+        
+        for (size_t i = 1; i < objects.size(); i++) {
+            if (objects[i].prob > max_score) {
+                max_score = objects[i].prob;
+                max_idx = i;
+            }
+        }
+
+        result.push_back(objects[max_idx]);
+        objects.erase(objects.begin() + max_idx);
+        scores.erase(scores.begin() + max_idx);
+
+        if (objects.empty()) break;
+
+        for (size_t i = 0; i < objects.size(); i++) {
+            float diou = calculate_diou(result.back(), objects[i]);
+            
+            if (diou > iou_threshold_) {
+                float decay = std::exp(-(diou * diou) / nms_sigma_);
+                objects[i].prob *= decay;
+                scores[i] *= decay;
+            }
+        }
+
+        objects.erase(
+            std::remove_if(objects.begin(), objects.end(),
+                [](const Object& obj) { return obj.prob < 0.001f; }),
+            objects.end()
+        );
+        
+        scores.erase(
+            std::remove_if(scores.begin(), scores.end(),
+                [](float s) { return s < 0.001f; }),
+            scores.end()
+        );
+    }
+
+    objects = result;
+}
+
+void YOLOv8RKNN::apply_multi_label_filtering(std::vector<Object>& objects) const {
+    for (auto& obj : objects) {
+        obj.multi_labels.clear();
+        obj.multi_labels.emplace_back(obj.label, obj.prob);
+    }
+}
+
+void YOLOv8RKNN::apply_bbox_coexistence(std::vector<Object>& objects) const {
+    if (objects.size() < 2) return;
+
+    std::vector<bool> suppressed(objects.size(), false);
+    
+    for (size_t i = 0; i < objects.size(); i++) {
+        if (suppressed[i]) continue;
+        
+        for (size_t j = i + 1; j < objects.size(); j++) {
+            if (suppressed[j]) continue;
+
+            float center_dist = std::sqrt(
+                std::pow(objects[i].cx() - objects[j].cx(), 2) +
+                std::pow(objects[i].cy() - objects[j].cy(), 2)
+            );
+
+            float avg_width = (objects[i].rect.width + objects[j].rect.width) * 0.5f;
+            
+            if (center_dist < avg_width * 0.3f) {
+                if (objects[i].prob > objects[j].prob) {
+                    suppressed[j] = true;
+                } else if (objects[j].prob > objects[i].prob) {
+                    suppressed[j] = true;
+                } else {
+                    float iou = calculate_iou(objects[i], objects[j]);
+                    if (iou > 0.5f) {
+                        if (objects[i].rect.area() > objects[j].rect.area()) {
+                            suppressed[j] = true;
+                        } else {
+                            suppressed[i] = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<Object> filtered;
+    for (size_t i = 0; i < objects.size(); i++) {
+        if (!suppressed[i]) {
+            filtered.push_back(objects[i]);
+        }
+    }
+    objects = filtered;
+}
+
 bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
                        float conf_thresh, float nms_thresh) const {
-    (void)nms_thresh; // Currently not used, NMS is handled internally
+    (void)nms_thresh;
+    
     int input_w = 640, input_h = 640;
     float scale = std::min((float)input_w / img.cols, (float)input_h / img.rows);
     int new_w = img.cols * scale;
@@ -103,8 +247,8 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
     rknn_outputs_get(ctx, io_num.n_output, outputs.data(), nullptr);
 
     objects.clear();
+    std::vector<std::pair<int, float>> cls_probs(80);
 
-    // Process 3 detection heads
     for (int s = 0; s < 3; s++) {
         float* bbox_data = (float*)outputs[s*3 + 0].buf;
         float* cls_data  = (float*)outputs[s*3 + 1].buf;
@@ -123,8 +267,10 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
 
                 float max_cls = 0.0f;
                 int cls_id = -1;
+                
                 for (int c = 0; c < 80; c++) {
                     float cls_prob = sigmoid(cls_data[c * area + idx]);
+                    cls_probs[c] = {c, cls_prob};
                     if (cls_prob > max_cls) {
                         max_cls = cls_prob;
                         cls_id = c;
@@ -134,7 +280,6 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
                 float final_conf = obj_conf * max_cls;
                 if (final_conf < conf_thresh) continue;
 
-                // Decode bounding box
                 float box[4] = {0};
                 for (int k = 0; k < 4; k++) {
                     float max_val = -FLT_MAX;
@@ -164,7 +309,6 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
                 float x2 = cx + box[2] * stride;
                 float y2 = cy + box[3] * stride;
 
-                // Transform to original image coordinates
                 x1 = (x1 - pad_x) / scale;
                 y1 = (y1 - pad_y) / scale;
                 x2 = (x2 - pad_x) / scale;
@@ -180,6 +324,13 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
                     obj.rect = cv::Rect_<float>(x1, y1, x2-x1, y2-y1);
                     obj.label = cls_id;
                     obj.prob = final_conf;
+                    
+                    for (const auto& p : cls_probs) {
+                        if (p.second > multi_label_threshold_ && p.second > max_cls * 0.5f) {
+                            obj.multi_labels.emplace_back(p.first, p.second * obj_conf);
+                        }
+                    }
+                    
                     objects.push_back(obj);
                 }
             }
@@ -188,57 +339,15 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
 
     rknn_outputs_release(ctx, io_num.n_output, outputs.data());
 
-    // Cluster nearby detections
     if (!objects.empty()) {
         std::sort(objects.begin(), objects.end(),
-                 [](const Object& a, const Object& b) { return a.prob > b.prob; });
+                  [](const Object& a, const Object& b) { return a.prob > b.prob; });
 
-        std::vector<bool> processed(objects.size(), false);
-        std::vector<Object> consolidated_objects;
-
-        for (size_t i = 0; i < objects.size(); i++) {
-            if (processed[i]) continue;
-
-            Object cluster_obj = objects[i];
-            std::vector<size_t> cluster_members = {i};
-
-            for (size_t j = 0; j < objects.size(); j++) {
-                if (i == j || processed[j]) continue;
-                if (objects[i].label != objects[j].label) continue;
-
-                float center_dist = std::sqrt(std::pow(
-                    objects[i].rect.x + objects[i].rect.width/2.0f -
-                    (objects[j].rect.x + objects[j].rect.width/2.0f), 2) +
-                    std::pow(objects[i].rect.y + objects[i].rect.height/2.0f -
-                    (objects[j].rect.y + objects[j].rect.height/2.0f), 2));
-
-                float combined_width = std::max(objects[i].rect.br().x, objects[j].rect.br().x) -
-                                     std::min(objects[i].rect.x, objects[j].rect.x);
-                float combined_height = std::max(objects[i].rect.br().y, objects[j].rect.br().y) -
-                                      std::min(objects[i].rect.y, objects[j].rect.y);
-                float avg_size = (combined_width + combined_height) / 2.0f;
-
-                if (center_dist < avg_size * 2.0f) {
-                    float x1 = std::min(cluster_obj.rect.x, objects[j].rect.x);
-                    float y1 = std::min(cluster_obj.rect.y, objects[j].rect.y);
-                    float x2 = std::max(cluster_obj.rect.br().x, objects[j].rect.br().x);
-                    float y2 = std::max(cluster_obj.rect.br().y, objects[j].rect.br().y);
-
-                    cluster_obj.rect = cv::Rect_<float>(x1, y1, x2-x1, y2-y1);
-                    float weight_i = objects[i].rect.area();
-                    float weight_j = objects[j].rect.area();
-                    cluster_obj.prob = (cluster_obj.prob * weight_i + objects[j].prob * weight_j) / 
-                                      (weight_i + weight_j);
-                    cluster_members.push_back(j);
-                    processed[j] = true;
-                }
-            }
-
-            processed[i] = true;
-            consolidated_objects.push_back(cluster_obj);
-        }
-
-        objects = consolidated_objects;
+        soft_nms(objects);
+        
+        apply_multi_label_filtering(objects);
+        
+        apply_bbox_coexistence(objects);
     }
 
     return true;
