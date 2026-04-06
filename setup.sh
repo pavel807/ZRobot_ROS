@@ -152,8 +152,9 @@ build_workspace() {
     echo -e "${YELLOW}▸ Сборка workspace...${NC}"
     echo ""
     
-    if [ ! -d "src" ]; then
-        echo -e "${RED}✗ Папка src не найдена!${NC}"
+    # Check for packages (either in src/ or root)
+    if [ ! -d "src" ] && [ -z "$(ls -d zrobot_* 2>/dev/null)" ]; then
+        echo -e "${RED}✗ Пакеты не найдены!${NC}"
         exit 1
     fi
     
