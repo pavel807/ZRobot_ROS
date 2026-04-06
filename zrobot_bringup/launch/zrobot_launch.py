@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """
 ZRobot Bringup Launch File
-Starts all ZRobot nodes: perception, control, web interface, lidar, and obstacle avoidance
+Automatically finds zrobot_config.yaml in project root
 """
 
+import os
+from pathlib import Path
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.actions import SetEnvironmentVariable, UnsetEnvironmentVariable
@@ -12,71 +14,50 @@ from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
 
+def find_config_file():
+    """Find zrobot_config.yaml - checks source dir first, then package share"""
+    # Try source workspace first
+    current = Path(__file__).resolve()
+    project_root = current.parent.parent.parent.parent
+
+    config_in_root = project_root / "zrobot_config.yaml"
+    if config_in_root.exists():
+        return str(config_in_root)
+
+    # Fallback to package share (installed)
+    try:
+        from ament_index_python.packages import get_package_share_directory
+
+        pkg_dir = get_package_share_directory("zrobot_bringup")
+        return os.path.join(pkg_dir, "config", "zrobot_config.yaml")
+    except:
+        pass
+
+    # Last resort: relative from this file
+    return str(current.parent.parent.parent / "zrobot_config.yaml")
+
+
 def generate_launch_description():
-    # --- 1. Пути к файлам ---
-    pkg_bringup = FindPackageShare("zrobot_bringup")
+    config_file = find_config_file()
 
-    config_file = PathJoinSubstitution([pkg_bringup, "config", "zrobot_config.yaml"])
-
-    # --- 2. Аргументы запуска (можно менять через командную строку) ---
     return LaunchDescription(
         [
-            # Use FastDDS (default on many Jazzy installs), but explicitly unset the
-            # profile env var that points to an incompatible XML (segment_count, etc).
             SetEnvironmentVariable("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
             UnsetEnvironmentVariable("FASTRTPS_DEFAULT_PROFILES_FILE"),
-            DeclareLaunchArgument(
-                "model_path",
-                default_value="models/yolov8s.rknn",
-                description="Path to YOLO RKNN model (yolov8s — баланс точности/скорости)",
-            ),
-            DeclareLaunchArgument(
-                "camera_id",
-                default_value="1",
-                description="Camera device ID (1 = твоя камера)",
-            ),
-            DeclareLaunchArgument(
-                "uart_port",
-                default_value="/dev/ttyACM0",
-                description="UART port for Arduino",
-            ),
-            DeclareLaunchArgument(
-                "baud_rate",
-                default_value="115200",
-                description="Baud rate for Arduino (115200 — твоя конфигурация)",
-            ),
-            DeclareLaunchArgument(
-                "conf_threshold",
-                default_value="0.30",
-                description="Confidence threshold for detection (0.30 как в оригинале)",
-            ),
-            DeclareLaunchArgument(
-                "target_object",
-                default_value="person",
-                description="Target object to track",
-            ),
-            DeclareLaunchArgument(
-                "max_speed",
-                default_value="245",
-                description="Maximum motor speed (245 как в оригинале)",
-            ),
-            DeclareLaunchArgument(
-                "min_speed",
-                default_value="165",
-                description="Minimum motor speed threshold (165 как в оригинале)",
-            ),
-            DeclareLaunchArgument(
-                "max_linear_speed",
-                default_value="0.3",
-                description="Maximum linear speed for auto-follow",
-            ),
-            DeclareLaunchArgument(
-                "turn_speed",
-                default_value="0.5",
-                description="Turn speed for auto-follow",
-            ),
-            # --- 3. Узлы (Nodes) ---
-            # YOLO Detector Node
+            DeclareLaunchArgument("config_file", default_value=config_file),
+            DeclareLaunchArgument("model_path", default_value="models/yolov8s.rknn"),
+            DeclareLaunchArgument("camera_id", default_value="1"),
+            DeclareLaunchArgument("conf_threshold", default_value="0.30"),
+            DeclareLaunchArgument("target_object", default_value="person"),
+            DeclareLaunchArgument("uart_port", default_value="/dev/ttyACM0"),
+            DeclareLaunchArgument("baud_rate", default_value="115200"),
+            DeclareLaunchArgument("max_speed", default_value="245"),
+            DeclareLaunchArgument("min_speed", default_value="165"),
+            DeclareLaunchArgument("max_linear_speed", default_value="0.3"),
+            DeclareLaunchArgument("turn_speed", default_value="0.5"),
+            DeclareLaunchArgument("lidar_port", default_value="/dev/ttyUSB0"),
+            DeclareLaunchArgument("min_safe_distance", default_value="0.3"),
+            DeclareLaunchArgument("web_port", default_value="8080"),
             Node(
                 package="zrobot_perception",
                 executable="yolo_detector_node",
@@ -94,7 +75,6 @@ def generate_launch_description():
                     },
                 ],
             ),
-            # Motor Controller Node (Arduino)
             Node(
                 package="zrobot_control",
                 executable="motor_controller_node",
@@ -110,20 +90,19 @@ def generate_launch_description():
                     },
                 ],
             ),
-            # Web Interface Node
             Node(
                 package="web_interface",
                 executable="web_server",
                 name="web_interface",
                 output="screen",
                 parameters=[
+                    config_file,
                     {
                         "host": "0.0.0.0",
-                        "port": 8080,
-                    }
+                        "port": LaunchConfiguration("web_port"),
+                    },
                 ],
             ),
-            # LD Lidar Node (LD19)
             Node(
                 package="ldlidar_stl_ros2",
                 executable="ldlidar_stl_ros2_node",
@@ -132,33 +111,29 @@ def generate_launch_description():
                 respawn=True,
                 respawn_delay=2.0,
                 parameters=[
+                    config_file,
                     {
                         "product_name": "LDLiDAR_LD19",
                         "topic_name": "scan",
-                        "port_name": "/dev/ttyUSB0",
+                        "port_name": LaunchConfiguration("lidar_port"),
                         "port_baudrate": 230400,
                         "frame_id": "base_laser",
                         "laser_scan_dir": True,
                         "enable_angle_crop_func": False,
-                    }
+                    },
                 ],
             ),
-            # Obstacle Avoidance Node
             Node(
                 package="zrobot_obstacle_avoidance",
                 executable="obstacle_avoidance_node",
                 name="obstacle_avoidance",
                 output="screen",
                 parameters=[
+                    config_file,
                     {
                         "enabled": True,
-                        "min_safe_distance": 0.3,
-                        "slow_down_distance": 0.5,
-                        "max_linear_speed": 0.3,
-                        "turn_speed": 0.5,
-                        "scan_angle_range": 60.0,
-                        "scan_timeout_sec": 1.0,
-                    }
+                        "min_safe_distance": LaunchConfiguration("min_safe_distance"),
+                    },
                 ],
             ),
         ]

@@ -1,0 +1,46 @@
+# ZRobot Configuration
+# Main configuration file - used by launch and all nodes
+
+zrobot_perception:
+  model_path: "models/yolov8s.rknn"
+  camera_id: 1
+  width: 640
+  height: 640
+  fps: 30
+  conf_threshold: 0.30
+  target_object: "person"
+  enable_tracking: true
+  adaptive_threshold: false
+  show_category: true
+  enable_auto_follow: true
+  max_linear_speed: 0.3
+  turn_speed: 0.5
+
+zrobot_control:
+  uart_port: "/dev/ttyACM0"
+  baud_rate: 115200
+  max_speed: 245
+  min_speed: 165
+  enabled: true
+
+zrobot_lidar:
+  product_name: "LDLiDAR_LD19"
+  topic_name: "scan"
+  port_name: "/dev/ttyUSB0"
+  port_baudrate: 230400
+  frame_id: "base_laser"
+  laser_scan_dir: true
+  enable_angle_crop_func: false
+
+zrobot_obstacle_avoidance:
+  enabled: true
+  min_safe_distance: 0.3
+  slow_down_distance: 0.5
+  max_linear_speed: 0.3
+  turn_speed: 0.5
+  scan_angle_range: 60.0
+  scan_timeout_sec: 1.0
+
+zrobot_web:
+  host: "0.0.0.0"
+  port: 8080

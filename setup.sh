@@ -3,68 +3,191 @@
 
 set -e
 
-echo "=========================================="
-echo "ZRobot ROS2 Setup"
-echo "=========================================="
-
-# DDS: keep default RMW (FastDDS on most Jazzy installs), but avoid forcing an
-# incompatible FastDDS profile XML (segment_count, etc.).
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
-unset FASTRTPS_DEFAULT_PROFILES_FILE
-
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-NC='\033[0m' # No Color
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+MAGENTA='\033[0;35m'
+BOLD='\033[1m'
+NC='\033[0m'
 
-# Check ROS2
-if [ -z "$ROS_DISTRO" ]; then
-    echo -e "${RED}Error: ROS2 not sourced!${NC}"
-    echo "Run: source /opt/ros/jazzy/setup.bash"
-    exit 1
-fi
+# Spinner chars
+SPINNER=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
+SPIN_LEN=10
 
-echo -e "${GREEN}✓ ROS2 $ROS_DISTRO detected${NC}"
+# ASCII Art
+ZROBOT_ART="
+   ██████╗ ███████╗████████╗██████╗  ██████╗ ██████╗  █████╗ ██████╗  ██████╗ 
+  ██╔════╝ ██╔════╝╚══██╔══╝██╔══██╗██╔═══██╗██╔══██╗██╔══██╗██╔══██╗██╔════╝ 
+  ██║  ███╗█████╗     ██║   ██████╔╝██║   ██║██████╔╝███████║██████╔╝██║  ███╗
+  ██║   ██║██╔══╝     ██║   ██╔══██╗██║   ██║██╔══██╗██╔══██║██╔══██╗██║   ██║
+  ╚██████╔╝███████╗   ██║   ██║  ██║╚██████╔╝██████╔╝██║  ██║██║  ██║╚██████╔╝
+   ╚═════╝ ╚══════╝   ╚═╝   ╚═╝  ╚═╝ ╚═════╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝ 
+"
 
-# Install Python dependencies
-echo -e "${YELLOW}Installing Python dependencies...${NC}"
-pip3 install aiohttp numpy opencv-python-headless 2>/dev/null || true
+print_header() {
+    clear
+    echo -e "${CYAN}${ZROBOT_ART}${NC}"
+    echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${BOLD}                 ZRobot ROS2 Setup${NC}"
+    echo -e "${BOLD}${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+}
 
-# Install ROS2 dependencies
-echo -e "${YELLOW}Checking ROS2 dependencies...${NC}"
-sudo apt-get update -qq
-sudo apt-get install -y -qq \
-    ros-$ROS_DISTRO-cv-bridge \
-    ros-$ROS_DISTRO-vision-msgs \
-    ros-$ROS_DISTRO-image-transport \
-    ros-$ROS_DISTRO-libopencv-dev \
-    python3-aiohttp \
-    python3-numpy \
-    python3-opencv \
-    libyaml-cpp-dev \
-    2>/dev/null || true
+spinner() {
+    local pid=$1
+    local delay=0.1
+    while kill -0 $pid 2>/dev/null; do
+        for i in $(seq 0 $((SPIN_LEN-1))); do
+            printf "\r${YELLOW}${SPINNER[$i]}${NC} "
+            sleep $delay
+        done
+    done
+    printf "\r"
+}
 
-# Create models directory
-echo -e "${YELLOW}Creating models directory...${NC}"
-mkdir -p models
-echo "Place your .rknn model files here"
+check_ros() {
+    print_header
+    echo -e "${YELLOW}▸ Проверка ROS2...${NC}"
+    
+    if [ -z "$ROS_DISTRO" ]; then
+        echo -e "${RED}✗ ROS2 не найден!${NC}"
+        echo ""
+        echo -e "${CYAN}Сначала запустите:${NC}"
+        echo -e "  ${GREEN}source /opt/ros/jazzy/setup.bash${NC}"
+        exit 1
+    fi
+    
+    echo -e "${GREEN}✓ ROS2 $ROS_DISTRO найден${NC}"
+    echo ""
+}
 
-# Build
-echo -e "${YELLOW}Building...${NC}"
-colcon build --symlink-install
+install_deps() {
+    print_header
+    echo -e "${YELLOW}▸ Установка зависимостей...${NC}"
+    echo ""
+    
+    # DDS
+    export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+    unset FASTRTPS_DEFAULT_PROFILES_FILE
+    
+    # Python deps
+    echo -e "${BLUE}  Python пакеты...${NC}"
+    pip3 install --quiet aiohttp numpy opencv-python-headless psutil 2>/dev/null || true
+    echo -e "${GREEN}  ✓ Python зависимости${NC}"
+    echo ""
+    
+    # ROS2 deps
+    echo -e "${BLUE}  ROS2 пакеты...${NC}"
+    sudo apt-get update -qq 2>/dev/null
+    sudo apt-get install -y -qq \
+        ros-$ROS_DISTRO-cv-bridge \
+        ros-$ROS_DISTRO-vision-msgs \
+        ros-$ROS_DISTRO-image-transport \
+        ros-$ROS_DISTRO-libopencv-dev \
+        python3-aiohttp \
+        python3-numpy \
+        python3-opencv \
+        python3-psutil \
+        libyaml-cpp-dev \
+        2>/dev/null || true
+    echo -e "${GREEN}  ✓ ROS2 зависимости${NC}"
+    echo ""
+}
 
-# Source
-echo -e "${YELLOW}Sourcing workspace...${NC}"
-source install/setup.bash
+setup_models() {
+    print_header
+    echo -e "${YELLOW}▸ Настройка директорий...${NC}"
+    echo ""
+    
+    mkdir -p models
+    echo -e "${GREEN}✓ Директория models создана${NC}"
+    
+    if [ ! -f "zrobot_config.yaml" ]; then
+        echo -e "${YELLOW}⚠ Конфиг не найден! Создаю по умолчанию...${NC}"
+        cat > zrobot_config.yaml << 'EOF'
+# ZRobot Configuration
 
-echo ""
-echo -e "${GREEN}=========================================="
-echo "Setup Complete!"
-echo "==========================================${NC}"
-echo ""
-echo "To run ZRobot:"
-echo "  ros2 launch zrobot_bringup zrobot_launch.py"
-echo ""
-echo "Web interface: http://localhost:8080"
-echo ""
+zrobot_perception:
+  model_path: "models/yolov8s.rknn"
+  camera_id: 1
+  conf_threshold: 0.30
+  target_object: "person"
+  max_linear_speed: 0.3
+  turn_speed: 0.5
+
+zrobot_control:
+  uart_port: "/dev/ttyACM0"
+  baud_rate: 115200
+  max_speed: 245
+  min_speed: 165
+
+zrobot_lidar:
+  port_name: "/dev/ttyUSB0"
+  port_baudrate: 230400
+
+zrobot_obstacle_avoidance:
+  enabled: true
+  min_safe_distance: 0.3
+
+zrobot_web:
+  port: 8080
+EOF
+    else
+        echo -e "${GREEN}✓ Конфиг zrobot_config.yaml найден${NC}"
+    fi
+    
+    if [ ! -f "models/yolov8s.rknn" ]; then
+        echo -e "${YELLOW}⚠ Модель не найдена! Поместите yolov8s.rknn в папку models/${NC}"
+    else
+        echo -e "${GREEN}✓ Модель yolov8s.rknn найдена${NC}"
+    fi
+    echo ""
+}
+
+build_workspace() {
+    print_header
+    echo -e "${YELLOW}▸ Сборка workspace...${NC}"
+    echo ""
+    
+    if [ ! -d "src" ]; then
+        echo -e "${RED}✗ Папка src не найдена!${NC}"
+        exit 1
+    fi
+    
+    echo -e "${BLUE}  Компиляция...${NC}"
+    colcon build --symlink-install 2>&1 | tail -20
+    echo ""
+    echo -e "${GREEN}✓ Сборка завершена${NC}"
+    echo ""
+}
+
+show_summary() {
+    print_header
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+    echo -e "${GREEN}                     ✨ Установка завершена!${NC}"
+    echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${CYAN}Для запуска:${NC}"
+    echo -e "  ${YELLOW}source install/setup.bash${NC}"
+    echo -e "  ${YELLOW}ros2 launch zrobot_bringup zrobot_launch.py${NC}"
+    echo ""
+    echo -e "${CYAN}Веб-интерфейс:${NC}"
+    echo -e "  ${YELLOW}http://localhost:8080${NC}"
+    echo ""
+    echo -e "${CYAN}Конфиг:${NC}"
+    echo -e "  ${GREEN}zrobot_config.yaml${NC} (редактируй - пересборка не нужна)"
+    echo ""
+}
+
+main() {
+    check_ros
+    install_deps
+    setup_models
+    build_workspace
+    show_summary
+}
+
+main "$@"
