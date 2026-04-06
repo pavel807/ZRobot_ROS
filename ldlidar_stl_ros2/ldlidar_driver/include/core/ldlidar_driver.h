@@ -18,21 +18,20 @@
 
 namespace ldlidar {
 
-class LiDARDriver {
+class LDLidarDriver {
 public:
-    LiDARDriver();
-    ~LiDARDriver();
+    LDLidarDriver();
+    ~LDLidarDriver();
 
-    bool init(LDType type, const std::string& port, int baudrate);
-    bool start();
-    void stop();
-    bool getScanData(Points2D& points);
-    LidarStatus getStatus() const;
-    void enableFilter(bool enable);
+    bool Start(LDType type, const std::string& port, int baudrate, int comm_mode);
+    void Stop();
+    bool GetLaserScanData(Points2D& out);
+    LidarStatus GetLidarStatus();
+    void EnableFilter(bool enable);
 
 private:
-    class Impl;
-    std::unique_ptr<Impl> impl_;
+    LiPkg* pkg_;
+    bool is_start_;
 };
 
 }

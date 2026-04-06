@@ -11,6 +11,7 @@
 
 #include <vector>
 #include <string>
+#include <cmath>
 
 namespace ldlidar {
 
@@ -30,13 +31,22 @@ enum class LidarStatus {
   HARD_ERROR = 3,
 };
 
+enum {
+  COMM_SERIAL_MODE = 0,
+  COMM_NETWORK_MODE = 1,
+};
+
+#define ANGLE_TO_RADIAN(angle) ((angle) * M_PI / 180.0)
+
 struct PointData {
   float distance;
   float angle;
   uint8_t intensity;
+  uint64_t stamp;
   
-  PointData() : distance(0.0f), angle(0.0f), intensity(0) {}
-  PointData(float d, float a, uint8_t i) : distance(d), angle(a), intensity(i) {}
+  PointData() : distance(0.0f), angle(0.0f), intensity(0), stamp(0) {}
+  PointData(float d, float a, uint8_t i) : distance(d), angle(a), intensity(i), stamp(0) {}
+  PointData(float d, float a, uint8_t i, uint64_t s) : distance(d), angle(a), intensity(i), stamp(s) {}
 };
 
 typedef std::vector<PointData> Points2D;
