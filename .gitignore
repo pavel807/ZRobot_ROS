@@ -41,4 +41,4 @@ models/
 
 # Configuration overrides
 *.yaml.local
-core
+!ldlidar_stl_ros2/ldlidar_driver/include/core/
