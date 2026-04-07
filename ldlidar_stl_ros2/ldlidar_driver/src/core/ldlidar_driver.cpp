@@ -87,7 +87,7 @@ LidarStatus LDLidarDriver::GetLaserScanData(Points2D& out, int timeout_ms) {
     if (pkg_ && is_start_) {
         if (pkg_->GetLaserScanData(out)) {
             if (filter_enabled_ && tofbf_) {
-                tofbf_->Filter(out, out);
+                out = tofbf_->Filter(out);
             }
             return LidarStatus::NORMAL;
         }
