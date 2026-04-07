@@ -53,6 +53,8 @@ bool YOLOv8RKNN::init(const char* model_path) {
         for (int d = 0; d < output_attrs[i].n_dims; d++) {
             std::cout << " [" << d << "]=" << output_attrs[i].dims[d];
         }
+        std::cout << " dtype=" << output_attrs[i].dtype;
+        std::cout << " quant=" << output_attrs[i].quantization;
         std::cout << RESET << std::endl;
     }
 
@@ -218,6 +220,10 @@ void YOLOv8RKNN::apply_bbox_coexistence(std::vector<Object>& objects) const {
     objects = filtered;
 }
 
+float dequantize_int8(int8_t val, float scale, int32_t zero_point) {
+    return (float)(val - zero_point) * scale;
+}
+
 bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
                        float conf_thresh, float nms_thresh) const {
     (void)nms_thresh;
@@ -258,26 +264,17 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
     objects.clear();
     std::vector<std::pair<int, float>> cls_probs(80);
 
-    // YOLOv8 новый формат: 1 выход [1, 84, 8400]
-    // 84 = 4 (bbox) + 80 (classes)
-    // 8400 = 80*80 + 40*40 + 20*20 (3 scales)
-    
     if (io_num.n_output >= 1) {
-        float* output_data = (float*)outputs[0].buf;
+        int8_t* output_int8 = (int8_t*)outputs[0].buf;
         
-        int dims_count = output_attrs[0].n_dims;
-        int batch = output_attrs[0].dims[0];
+        float output_scale = output_attrs[0].scale;
+        int32_t output_zero_point = output_attrs[0].zero_point;
+        
         int num_classes = output_attrs[0].dims[1];
         int num_anchors = output_attrs[0].dims[2];
         
-        int num_detections = num_anchors;
-        int num_coords = 4;
-        int num_scores = num_classes;
-        
-        // Strides для 3 scale: 8, 16, 32
         int strides[3] = {8, 16, 32};
         int grid_sizes[3] = {80, 40, 20};
-        int anchor_counts[3] = {6400, 1600, 400};
         
         int offset = 0;
         
@@ -291,22 +288,19 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
                 for (int w = 0; w < grid_w; w++) {
                     int idx = offset + h * grid_w + w;
                     
-                    // Bounding box (tx, ty, tw, th)
-                    float tx = output_data[idx];
-                    float ty = output_data[num_anchors + idx];
-                    float tw = output_data[num_anchors * 2 + idx];
-                    float th = output_data[num_anchors * 3 + idx];
+                    float tx = dequantize_int8(output_int8[idx], output_scale, output_zero_point);
+                    float ty = dequantize_int8(output_int8[num_anchors + idx], output_scale, output_zero_point);
+                    float tw = dequantize_int8(output_int8[num_anchors * 2 + idx], output_scale, output_zero_point);
+                    float th = dequantize_int8(output_int8[num_anchors * 3 + idx], output_scale, output_zero_point);
                     
-                    // Objectness score
-                    float obj_score = sigmoid(output_data[num_anchors * 4 + idx]);
+                    float obj_score = sigmoid(dequantize_int8(output_int8[num_anchors * 4 + idx], output_scale, output_zero_point));
                     if (obj_score < 0.001f) continue;
                     
-                    // Find best class
                     float max_cls = 0.0f;
                     int cls_id = -1;
                     
                     for (int c = 0; c < num_classes; c++) {
-                        float cls_score = sigmoid(output_data[num_anchors * (4 + 1 + c) + idx]);
+                        float cls_score = sigmoid(dequantize_int8(output_int8[num_anchors * (4 + 1 + c) + idx], output_scale, output_zero_point));
                         cls_probs[c] = {c, cls_score};
                         if (cls_score > max_cls) {
                             max_cls = cls_score;
@@ -317,29 +311,24 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
                     float final_conf = obj_score * max_cls;
                     if (final_conf < conf_thresh || cls_id < 0) continue;
                     
-                    // Decode box (YOLOv8 format)
                     float cx = (w + 0.5f) * stride;
                     float cy = (h + 0.5f) * stride;
                     
-                    // Apply sigmoid to tx, ty
-                    float bx = (sigmoid(tx) * 2 - 0.5 + w) * stride;
-                    float by = (sigmoid(ty) * 2 - 0.5 + h) * stride;
+                    float bx = (sigmoid(tx) * 2 - 0.5f + w) * stride;
+                    float by = (sigmoid(ty) * 2 - 0.5f + h) * stride;
                     float bw = (sigmoid(tw) * 2) * stride;
                     float bh = (sigmoid(th) * 2) * stride;
                     
-                    // Convert to corner format
                     float x1 = bx - bw / 2.0f;
                     float y1 = by - bh / 2.0f;
                     float x2 = bx + bw / 2.0f;
                     float y2 = by + bh / 2.0f;
                     
-                    // Apply padding/scale
                     x1 = (x1 - pad_x) / scale;
                     y1 = (y1 - pad_y) / scale;
                     x2 = (x2 - pad_x) / scale;
                     y2 = (y2 - pad_y) / scale;
                     
-                    // Clip to image bounds
                     x1 = std::max(0.0f, std::min(x1, (float)img.cols));
                     y1 = std::max(0.0f, std::min(y1, (float)img.rows));
                     x2 = std::max(0.0f, std::min(x2, (float)img.cols));
