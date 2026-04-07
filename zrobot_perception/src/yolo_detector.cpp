@@ -48,12 +48,12 @@ bool YOLOv8RKNN::init(const char* model_path) {
         output_attrs[i].index = i;
         rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &output_attrs[i], sizeof(rknn_tensor_attr));
         
-        std::cout << GREEN << "[YOLO] Output " << i 
-                  << ": dims_count=" << output_attrs[i].dims_count;
-        for (int d = 0; d < output_attrs[i].dims_count; d++) {
-            std::cout << " [" << d << "]=" << output_attrs[i].dims[d];
-        }
-        std::cout << RESET << std::endl;
+    std::cout << GREEN << "[YOLO] Output " << i 
+              << ": n_dims=" << output_attrs[i].n_dims;
+    for (int d = 0; d < output_attrs[i].n_dims; d++) {
+        std::cout << " [" << d << "]=" << output_attrs[i].dims[d];
+    }
+    std::cout << RESET << std::endl;
     }
 
     rknn_set_core_mask(ctx, RKNN_NPU_CORE_0_1_2);
@@ -266,7 +266,7 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
     std::vector<int> strides_detected;
     
     for (uint32_t i = 0; i < io_num.n_output; i++) {
-        int dims_count = output_attrs[i].dims_count;
+        int dims_count = output_attrs[i].n_dims;
         if (dims_count >= 4) {
             int h = output_attrs[i].dims[dims_count - 2];
             int w = output_attrs[i].dims[dims_count - 3];
@@ -303,7 +303,7 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
         int bbox_idx = -1, cls_idx = -1, obj_idx = -1;
         
         for (uint32_t i = 0; i < io_num.n_output; i++) {
-            int dims_count = output_attrs[i].dims_count;
+            int dims_count = output_attrs[i].n_dims;
             if (dims_count >= 4) {
                 int h = output_attrs[i].dims[dims_count - 2];
                 int w = output_attrs[i].dims[dims_count - 3];
