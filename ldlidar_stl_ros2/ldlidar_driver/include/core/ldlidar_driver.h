@@ -15,6 +15,7 @@
 
 #include <string>
 #include <memory>
+#include <functional>
 
 namespace ldlidar {
 
@@ -23,15 +24,32 @@ public:
     LDLidarDriver();
     ~LDLidarDriver();
 
+    std::string GetLidarSdkVersionNumber();
+    
+    void RegisterGetTimestampFunctional(std::function<uint64_t(void)> timestamp_handle);
+    
+    void EnableFilterAlgorithnmProcess(bool enable);
+    
     bool Start(LDType type, const std::string& port, int baudrate, int comm_mode);
+    
+    bool WaitLidarCommConnect(int timeout_ms);
+    
     void Stop();
-    bool GetLaserScanData(Points2D& out);
+    
+    LidarStatus GetLaserScanData(Points2D& out, int timeout_ms);
+    
+    void GetLidarScanFreq(double& freq);
+    
     LidarStatus GetLidarStatus();
+    
     void EnableFilter(bool enable);
 
 private:
     LiPkg* pkg_;
+    Tofbf* tofbf_;
     bool is_start_;
+    bool filter_enabled_;
+    double lidar_freq_;
 };
 
 }
