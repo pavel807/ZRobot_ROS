@@ -50,7 +50,7 @@ bool YOLOv8RKNN::init(const char* model_path) {
         
         std::cout << GREEN << "[YOLO] Output " << i 
                   << ": n_dims=" << output_attrs[i].n_dims;
-        for (int d = 0; d < output_attrs[i].n_dims; d++) {
+        for (uint32_t d = 0; d < output_attrs[i].n_dims; d++) {
             std::cout << " [" << d << "]=" << output_attrs[i].dims[d];
         }
         std::cout << " type=" << output_attrs[i].type;
@@ -281,37 +281,7 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
             int grid_h = grid_sizes[scale_idx];
             int grid_w = grid_sizes[scale_idx];
             int num_anchors_scale = grid_h * grid_w;
-            int stride = strides[scale_idx];
-            
-            for (int h = 0; h < grid_h; h++) {
-                for (int w = 0; w < grid_w; w++) {
-                    int idx = offset + h * grid_w + w;
-                    
-                    float tx = dequantize_int8(output_int8[idx], output_scale, output_zero_point);
-                    float ty = dequantize_int8(output_int8[num_anchors + idx], output_scale, output_zero_point);
-                    float tw = dequantize_int8(output_int8[num_anchors * 2 + idx], output_scale, output_zero_point);
-                    float th = dequantize_int8(output_int8[num_anchors * 3 + idx], output_scale, output_zero_point);
-                    
-                    float obj_score = sigmoid(dequantize_int8(output_int8[num_anchors * 4 + idx], output_scale, output_zero_point));
-                    if (obj_score < 0.001f) continue;
-                    
-                    float max_cls = 0.0f;
-                    int cls_id = -1;
-                    
-                    for (int c = 0; c < num_classes; c++) {
-                        float cls_score = sigmoid(dequantize_int8(output_int8[num_anchors * (4 + 1 + c) + idx], output_scale, output_zero_point));
-                        cls_probs[c] = {c, cls_score};
-                        if (cls_score > max_cls) {
-                            max_cls = cls_score;
-                            cls_id = c;
-                        }
-                    }
-                    
-                    float final_conf = obj_score * max_cls;
-                    if (final_conf < conf_thresh || cls_id < 0) continue;
-                    
-                    float cx = (w + 0.5f) * stride;
-                    float cy = (h + 0.5f) * stride;
+                    int stride = strides[scale_idx];
                     
                     float bx = (sigmoid(tx) * 2 - 0.5f + w) * stride;
                     float by = (sigmoid(ty) * 2 - 0.5f + h) * stride;
