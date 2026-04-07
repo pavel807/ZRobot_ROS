@@ -48,12 +48,12 @@ bool YOLOv8RKNN::init(const char* model_path) {
         output_attrs[i].index = i;
         rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &output_attrs[i], sizeof(rknn_tensor_attr));
         
-    std::cout << GREEN << "[YOLO] Output " << i 
-              << ": n_dims=" << output_attrs[i].n_dims;
-    for (int d = 0; d < output_attrs[i].n_dims; d++) {
-        std::cout << " [" << d << "]=" << output_attrs[i].dims[d];
-    }
-    std::cout << RESET << std::endl;
+        std::cout << GREEN << "[YOLO] Output " << i 
+                  << ": n_dims=" << output_attrs[i].n_dims;
+        for (int d = 0; d < output_attrs[i].n_dims; d++) {
+            std::cout << " [" << d << "]=" << output_attrs[i].dims[d];
+        }
+        std::cout << RESET << std::endl;
     }
 
     rknn_set_core_mask(ctx, RKNN_NPU_CORE_0_1_2);
@@ -258,168 +258,111 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
     objects.clear();
     std::vector<std::pair<int, float>> cls_probs(80);
 
-    // Динамическое определение выходов на основе dims
-    // Стандартный YOLOv8 имеет 3 detection head
-    // Каждый head имеет 3 выхода: bbox, cls, obj
+    // YOLOv8 новый формат: 1 выход [1, 84, 8400]
+    // 84 = 4 (bbox) + 80 (classes)
+    // 8400 = 80*80 + 40*40 + 20*20 (3 scales)
     
-    int num_heads = 0;
-    std::vector<int> strides_detected;
-    
-    for (uint32_t i = 0; i < io_num.n_output; i++) {
-        int dims_count = output_attrs[i].n_dims;
-        if (dims_count >= 4) {
-            int h = output_attrs[i].dims[dims_count - 2];
-            int w = output_attrs[i].dims[dims_count - 3];
-            if (h > 0 && w > 0) {
-                int stride = input_w / w;
-                bool found = false;
-                for (size_t s = 0; s < strides_detected.size(); s++) {
-                    if (strides_detected[s] == stride) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    strides_detected.push_back(stride);
-                }
-            }
-        }
-    }
-    
-    std::sort(strides_detected.begin(), strides_detected.end());
-    num_heads = strides_detected.size();
-    
-    // Обработка в зависимости от количества heads
-    if (num_heads == 0) {
-        std::cerr << RED << "[YOLO] No detection heads found!" << RESET << std::endl;
-        return false;
-    }
-    
-    // Для каждого head ищем bbox, cls, obj tensor
-    for (int head_idx = 0; head_idx < num_heads; head_idx++) {
-        int stride = strides_detected[head_idx];
+    if (io_num.n_output >= 1) {
+        float* output_data = (float*)outputs[0].buf;
         
-        // Ищем tensor с данным stride (bbox обычно первый)
-        int bbox_idx = -1, cls_idx = -1, obj_idx = -1;
+        int dims_count = output_attrs[0].n_dims;
+        int batch = output_attrs[0].dims[0];
+        int num_classes = output_attrs[0].dims[1];
+        int num_anchors = output_attrs[0].dims[2];
         
-        for (uint32_t i = 0; i < io_num.n_output; i++) {
-            int dims_count = output_attrs[i].n_dims;
-            if (dims_count >= 4) {
-                int h = output_attrs[i].dims[dims_count - 2];
-                int w = output_attrs[i].dims[dims_count - 3];
-                if (input_w / w == stride) {
-                    // Определяем тип по размеру
-                    int total = 1;
-                    for (int d = 0; d < dims_count - 2; d++) {
-                        total *= output_attrs[i].dims[d];
-                    }
+        int num_detections = num_anchors;
+        int num_coords = 4;
+        int num_scores = num_classes;
+        
+        // Strides для 3 scale: 8, 16, 32
+        int strides[3] = {8, 16, 32};
+        int grid_sizes[3] = {80, 40, 20};
+        int anchor_counts[3] = {6400, 1600, 400};
+        
+        int offset = 0;
+        
+        for (int scale_idx = 0; scale_idx < 3; scale_idx++) {
+            int grid_h = grid_sizes[scale_idx];
+            int grid_w = grid_sizes[scale_idx];
+            int num_anchors_scale = grid_h * grid_w;
+            int stride = strides[scale_idx];
+            
+            for (int h = 0; h < grid_h; h++) {
+                for (int w = 0; w < grid_w; w++) {
+                    int idx = offset + h * grid_w + w;
                     
-                    if (total == 4 * h * w) {
-                        bbox_idx = i;
-                    } else if (total == 80 * h * w) {
-                        cls_idx = i;
-                    } else if (total == 1 * h * w) {
-                        obj_idx = i;
-                    }
-                }
-            }
-        }
-        
-        if (bbox_idx < 0 || cls_idx < 0 || obj_idx < 0) {
-            // Fallback: просто берем первые 3 tensor для этого stride
-            bbox_idx = head_idx * 3;
-            cls_idx = head_idx * 3 + 1;
-            obj_idx = head_idx * 3 + 2;
-        }
-        
-        if (bbox_idx >= (int)io_num.n_output || cls_idx >= (int)io_num.n_output || obj_idx >= (int)io_num.n_output) {
-            continue;
-        }
-        
-        float* bbox_data = (float*)outputs[bbox_idx].buf;
-        float* cls_data  = (float*)outputs[cls_idx].buf;
-        float* obj_data  = (float*)outputs[obj_idx].buf;
-
-        int dims_count = output_attrs[bbox_idx].n_dims;
-        int H = output_attrs[bbox_idx].dims[dims_count - 2];
-        int W = output_attrs[bbox_idx].dims[dims_count - 3];
-        int area = H * W;
-
-        for (int h = 0; h < H; h++) {
-            for (int w = 0; w < W; w++) {
-                int idx = h * W + w;
-                float obj_conf = obj_data[idx];
-                if (obj_conf < 0.001f) continue;
-
-                float max_cls = 0.0f;
-                int cls_id = -1;
-                
-                for (int c = 0; c < 80; c++) {
-                    float cls_prob = sigmoid(cls_data[c * area + idx]);
-                    cls_probs[c] = {c, cls_prob};
-                    if (cls_prob > max_cls) {
-                        max_cls = cls_prob;
-                        cls_id = c;
-                    }
-                }
-
-                float final_conf = obj_conf * max_cls;
-                if (final_conf < conf_thresh) continue;
-
-                float box[4] = {0};
-                for (int k = 0; k < 4; k++) {
-                    float max_val = -FLT_MAX;
-                    float exp_vals[16];
-
-                    for (int d = 0; d < 16; d++) {
-                        float v = bbox_data[(k * 16 + d) * area + idx];
-                        if (v > max_val) max_val = v;
-                    }
-
-                    float sum = 0;
-                    for (int d = 0; d < 16; d++) {
-                        exp_vals[d] = fast_exp(bbox_data[(k * 16 + d) * area + idx] - max_val);
-                        sum += exp_vals[d];
-                    }
-
-                    box[k] = 0;
-                    for (int d = 0; d < 16; d++) {
-                        box[k] += d * (exp_vals[d] / sum);
-                    }
-                }
-
-                float cx = (w + 0.5f) * stride;
-                float cy = (h + 0.5f) * stride;
-                float x1 = cx - box[0] * stride;
-                float y1 = cy - box[1] * stride;
-                float x2 = cx + box[2] * stride;
-                float y2 = cy + box[3] * stride;
-
-                x1 = (x1 - pad_x) / scale;
-                y1 = (y1 - pad_y) / scale;
-                x2 = (x2 - pad_x) / scale;
-                y2 = (y2 - pad_y) / scale;
-
-                x1 = std::max(0.0f, std::min(x1, (float)img.cols));
-                y1 = std::max(0.0f, std::min(y1, (float)img.rows));
-                x2 = std::max(0.0f, std::min(x2, (float)img.cols));
-                y2 = std::max(0.0f, std::min(y2, (float)img.rows));
-
-                if (x2 > x1 && y2 > y1) {
-                    Object obj;
-                    obj.rect = cv::Rect_<float>(x1, y1, x2-x1, y2-y1);
-                    obj.label = cls_id;
-                    obj.prob = final_conf;
+                    // Bounding box (tx, ty, tw, th)
+                    float tx = output_data[idx];
+                    float ty = output_data[num_anchors + idx];
+                    float tw = output_data[num_anchors * 2 + idx];
+                    float th = output_data[num_anchors * 3 + idx];
                     
-                    for (const auto& p : cls_probs) {
-                        if (p.second > multi_label_threshold_ && p.second > max_cls * 0.5f) {
-                            obj.multi_labels.emplace_back(p.first, p.second * obj_conf);
+                    // Objectness score
+                    float obj_score = sigmoid(output_data[num_anchors * 4 + idx]);
+                    if (obj_score < 0.001f) continue;
+                    
+                    // Find best class
+                    float max_cls = 0.0f;
+                    int cls_id = -1;
+                    
+                    for (int c = 0; c < num_classes; c++) {
+                        float cls_score = sigmoid(output_data[num_anchors * (4 + 1 + c) + idx]);
+                        cls_probs[c] = {c, cls_score};
+                        if (cls_score > max_cls) {
+                            max_cls = cls_score;
+                            cls_id = c;
                         }
                     }
                     
-                    objects.push_back(obj);
+                    float final_conf = obj_score * max_cls;
+                    if (final_conf < conf_thresh || cls_id < 0) continue;
+                    
+                    // Decode box (YOLOv8 format)
+                    float cx = (w + 0.5f) * stride;
+                    float cy = (h + 0.5f) * stride;
+                    
+                    // Apply sigmoid to tx, ty
+                    float bx = (sigmoid(tx) * 2 - 0.5 + w) * stride;
+                    float by = (sigmoid(ty) * 2 - 0.5 + h) * stride;
+                    float bw = (sigmoid(tw) * 2) * stride;
+                    float bh = (sigmoid(th) * 2) * stride;
+                    
+                    // Convert to corner format
+                    float x1 = bx - bw / 2.0f;
+                    float y1 = by - bh / 2.0f;
+                    float x2 = bx + bw / 2.0f;
+                    float y2 = by + bh / 2.0f;
+                    
+                    // Apply padding/scale
+                    x1 = (x1 - pad_x) / scale;
+                    y1 = (y1 - pad_y) / scale;
+                    x2 = (x2 - pad_x) / scale;
+                    y2 = (y2 - pad_y) / scale;
+                    
+                    // Clip to image bounds
+                    x1 = std::max(0.0f, std::min(x1, (float)img.cols));
+                    y1 = std::max(0.0f, std::min(y1, (float)img.rows));
+                    x2 = std::max(0.0f, std::min(x2, (float)img.cols));
+                    y2 = std::max(0.0f, std::min(y2, (float)img.rows));
+                    
+                    if (x2 > x1 && y2 > y1) {
+                        Object obj;
+                        obj.rect = cv::Rect_<float>(x1, y1, x2-x1, y2-y1);
+                        obj.label = cls_id;
+                        obj.prob = final_conf;
+                        
+                        for (const auto& p : cls_probs) {
+                            if (p.second > multi_label_threshold_ && p.second > max_cls * 0.5f) {
+                                obj.multi_labels.emplace_back(p.first, p.second * obj_score);
+                            }
+                        }
+                        
+                        objects.push_back(obj);
+                    }
                 }
             }
+            
+            offset += num_anchors_scale;
         }
     }
 
