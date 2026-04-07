@@ -13,6 +13,22 @@ MAGENTA='\033[0;35m'
 BOLD='\033[1m'
 NC='\033[0m'
 
+# Error tracking
+ERRORS=0
+
+log_error() {
+    echo -e "${RED}✗ $1${NC}"
+    ((ERRORS++))
+}
+
+log_success() {
+    echo -e "${GREEN}✓ $1${NC}"
+}
+
+log_warn() {
+    echo -e "${YELLOW}⚠ $1${NC}"
+}
+
 # Spinner chars
 SPINNER=('⠋' '⠙' '⠹' '⠸' '⠼' '⠴' '⠦' '⠧' '⠇' '⠏')
 SPIN_LEN=10
@@ -75,32 +91,40 @@ install_deps() {
     
     # Python deps
     echo -e "${BLUE}  Python пакеты...${NC}"
-    pip3 install --break-system-packages --quiet 'numpy<2' aiohttp opencv-python-headless psutil 2>/dev/null || true
-    echo -e "${GREEN}  ✓ Python зависимости${NC}"
+    if pip3 install --break-system-packages --quiet 'numpy<2' aiohttp opencv-python-headless psutil 2>/dev/null; then
+        echo -e "${GREEN}  ✓ Python зависимости${NC}"
+    else
+        log_error "Не удалось установить Python пакеты"
+    fi
     echo ""
     
     # ROS2 deps
     echo -e "${BLUE}  ROS2 пакеты...${NC}"
-    sudo apt-get update -qq 2>/dev/null
-    sudo apt-get install -y -qq \
-        ros-$ROS_DISTRO-cv-bridge \
-        ros-$ROS_DISTRO-vision-msgs \
-        ros-$ROS_DISTRO-image-transport \
-        ros-$ROS_DISTRO-libopencv-dev \
-        ros-$ROS_DISTRO-sensor-msgs \
-        ros-$ROS_DISTRO-geometry-msgs \
-        ros-$ROS_DISTRO-std-msgs \
-        ros-$ROS_DISTRO-rclcpp \
-        ros-$ROS_DISTRO-rclpy \
-        ros-$ROS_DISTRO-cv-bridge \
-        ros-$ROS_DISTRO-message-filters \
-        python3-aiohttp \
-        python3-numpy \
-        python3-opencv \
-        python3-psutil \
-        libyaml-cpp-dev \
-        2>/dev/null || true
-    echo -e "${GREEN}  ✓ ROS2 зависимости${NC}"
+    if sudo apt-get update -qq 2>/dev/null; then
+        if sudo apt-get install -y -qq \
+            ros-$ROS_DISTRO-cv-bridge \
+            ros-$ROS_DISTRO-vision-msgs \
+            ros-$ROS_DISTRO-image-transport \
+            ros-$ROS_DISTRO-libopencv-dev \
+            ros-$ROS_DISTRO-sensor-msgs \
+            ros-$ROS_DISTRO-geometry-msgs \
+            ros-$ROS_DISTRO-std-msgs \
+            ros-$ROS_DISTRO-rclcpp \
+            ros-$ROS_DISTRO-rclpy \
+            ros-$ROS_DISTRO-message-filters \
+            python3-aiohttp \
+            python3-numpy \
+            python3-opencv \
+            python3-psutil \
+            libyaml-cpp-dev \
+            2>/dev/null; then
+            echo -e "${GREEN}  ✓ ROS2 зависимости${NC}"
+        else
+            log_error "Не удалось установить ROS2 пакеты"
+        fi
+    else
+        log_error "Не удалось обновить apt"
+    fi
     echo ""
 }
 
@@ -166,9 +190,12 @@ build_workspace() {
     fi
     
     echo -e "${BLUE}  Компиляция...${NC}"
-    colcon build --symlink-install 2>&1 | tail -20
-    echo ""
-    echo -e "${GREEN}✓ Сборка завершена${NC}"
+    if colcon build --symlink-install 2>&1 | tail -20; then
+        echo ""
+        echo -e "${GREEN}✓ Сборка завершена${NC}"
+    else
+        log_error "Ошибка сборки"
+    fi
     echo ""
 }
 
@@ -178,6 +205,12 @@ show_summary() {
     echo -e "${GREEN}                     ✨ Установка завершена!${NC}"
     echo -e "${GREEN}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
+    
+    if [ $ERRORS -gt 0 ]; then
+        echo -e "${YELLOW}⚠ Было ошибок: $ERRORS${NC}"
+        echo ""
+    fi
+    
     echo -e "${CYAN}Для запуска:${NC}"
     echo -e "  ${YELLOW}source install/setup.bash${NC}"
     echo -e "  ${YELLOW}ros2 launch zrobot_bringup zrobot_launch.py${NC}"
