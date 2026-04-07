@@ -108,7 +108,7 @@ def generate_launch_description():
                 executable="ldlidar_stl_ros2_node",
                 name="ldlidar",
                 output="screen",
-                respawn=True,
+                respawn=False,
                 respawn_delay=2.0,
                 parameters=[
                     config_file,
