@@ -41,10 +41,19 @@ bool YOLOv8RKNN::init(const char* model_path) {
 
     rknn_query(ctx, RKNN_QUERY_IN_OUT_NUM, &io_num, sizeof(io_num));
 
+    std::cout << GREEN << "[YOLO] Model outputs: " << io_num.n_output << RESET << std::endl;
+
     output_attrs.resize(io_num.n_output);
     for (uint32_t i = 0; i < io_num.n_output; i++) {
         output_attrs[i].index = i;
         rknn_query(ctx, RKNN_QUERY_OUTPUT_ATTR, &output_attrs[i], sizeof(rknn_tensor_attr));
+        
+        std::cout << GREEN << "[YOLO] Output " << i 
+                  << ": dims_count=" << output_attrs[i].dims_count;
+        for (int d = 0; d < output_attrs[i].dims_count; d++) {
+            std::cout << " [" << d << "]=" << output_attrs[i].dims[d];
+        }
+        std::cout << RESET << std::endl;
     }
 
     rknn_set_core_mask(ctx, RKNN_NPU_CORE_0_1_2);
@@ -249,14 +258,91 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
     objects.clear();
     std::vector<std::pair<int, float>> cls_probs(80);
 
-    for (int s = 0; s < 3; s++) {
-        float* bbox_data = (float*)outputs[s*3 + 0].buf;
-        float* cls_data  = (float*)outputs[s*3 + 1].buf;
-        float* obj_data  = (float*)outputs[s*3 + 2].buf;
+    // Динамическое определение выходов на основе dims
+    // Стандартный YOLOv8 имеет 3 detection head
+    // Каждый head имеет 3 выхода: bbox, cls, obj
+    
+    int num_heads = 0;
+    std::vector<int> strides_detected;
+    
+    for (uint32_t i = 0; i < io_num.n_output; i++) {
+        int dims_count = output_attrs[i].dims_count;
+        if (dims_count >= 4) {
+            int h = output_attrs[i].dims[dims_count - 2];
+            int w = output_attrs[i].dims[dims_count - 3];
+            if (h > 0 && w > 0) {
+                int stride = input_w / w;
+                bool found = false;
+                for (size_t s = 0; s < strides_detected.size(); s++) {
+                    if (strides_detected[s] == stride) {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    strides_detected.push_back(stride);
+                }
+            }
+        }
+    }
+    
+    std::sort(strides_detected.begin(), strides_detected.end());
+    num_heads = strides_detected.size();
+    
+    // Обработка в зависимости от количества heads
+    if (num_heads == 0) {
+        std::cerr << RED << "[YOLO] No detection heads found!" << RESET << std::endl;
+        return false;
+    }
+    
+    // Для каждого head ищем bbox, cls, obj tensor
+    for (int head_idx = 0; head_idx < num_heads; head_idx++) {
+        int stride = strides_detected[head_idx];
+        
+        // Ищем tensor с данным stride (bbox обычно первый)
+        int bbox_idx = -1, cls_idx = -1, obj_idx = -1;
+        
+        for (uint32_t i = 0; i < io_num.n_output; i++) {
+            int dims_count = output_attrs[i].dims_count;
+            if (dims_count >= 4) {
+                int h = output_attrs[i].dims[dims_count - 2];
+                int w = output_attrs[i].dims[dims_count - 3];
+                if (input_w / w == stride) {
+                    // Определяем тип по размеру
+                    int total = 1;
+                    for (int d = 0; d < dims_count - 2; d++) {
+                        total *= output_attrs[i].dims[d];
+                    }
+                    
+                    if (total == 4 * h * w) {
+                        bbox_idx = i;
+                    } else if (total == 80 * h * w) {
+                        cls_idx = i;
+                    } else if (total == 1 * h * w) {
+                        obj_idx = i;
+                    }
+                }
+            }
+        }
+        
+        if (bbox_idx < 0 || cls_idx < 0 || obj_idx < 0) {
+            // Fallback: просто берем первые 3 tensor для этого stride
+            bbox_idx = head_idx * 3;
+            cls_idx = head_idx * 3 + 1;
+            obj_idx = head_idx * 3 + 2;
+        }
+        
+        if (bbox_idx >= (int)io_num.n_output || cls_idx >= (int)io_num.n_output || obj_idx >= (int)io_num.n_output) {
+            continue;
+        }
+        
+        float* bbox_data = (float*)outputs[bbox_idx].buf;
+        float* cls_data  = (float*)outputs[cls_idx].buf;
+        float* obj_data  = (float*)outputs[obj_idx].buf;
 
-        int H = output_attrs[s*3 + 1].dims[2];
-        int W = output_attrs[s*3 + 1].dims[3];
-        int stride = STRIDES[s];
+        int dims_count = output_attrs[bbox_idx].dims_count;
+        int H = output_attrs[bbox_idx].dims[dims_count - 2];
+        int W = output_attrs[bbox_idx].dims[dims_count - 3];
         int area = H * W;
 
         for (int h = 0; h < H; h++) {
