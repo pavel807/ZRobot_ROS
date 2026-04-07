@@ -340,7 +340,7 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
         float* cls_data  = (float*)outputs[cls_idx].buf;
         float* obj_data  = (float*)outputs[obj_idx].buf;
 
-        int dims_count = output_attrs[bbox_idx].dims_count;
+        int dims_count = output_attrs[bbox_idx].n_dims;
         int H = output_attrs[bbox_idx].dims[dims_count - 2];
         int W = output_attrs[bbox_idx].dims[dims_count - 3];
         int area = H * W;
