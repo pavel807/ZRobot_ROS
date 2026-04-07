@@ -53,8 +53,7 @@ bool YOLOv8RKNN::init(const char* model_path) {
         for (int d = 0; d < output_attrs[i].n_dims; d++) {
             std::cout << " [" << d << "]=" << output_attrs[i].dims[d];
         }
-        std::cout << " dtype=" << output_attrs[i].dtype;
-        std::cout << " quant=" << output_attrs[i].quantization;
+        std::cout << " type=" << output_attrs[i].type;
         std::cout << RESET << std::endl;
     }
 
@@ -268,7 +267,7 @@ bool YOLOv8RKNN::infer(const cv::Mat& img, std::vector<Object>& objects,
         int8_t* output_int8 = (int8_t*)outputs[0].buf;
         
         float output_scale = output_attrs[0].scale;
-        int32_t output_zero_point = output_attrs[0].zero_point;
+        int32_t output_zero_point = 0;
         
         int num_classes = output_attrs[0].dims[1];
         int num_anchors = output_attrs[0].dims[2];
