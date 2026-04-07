@@ -51,7 +51,7 @@ file(GLOB  LDLIDAR_DRI_SERIAL ${CMAKE_CURRENT_SOURCE_DIR}/ldlidar_driver/src/ser
 
 add_executable(${PROJECT_NAME}_node  
   ${CMAKE_CURRENT_SOURCE_DIR}/src/demo.cpp 
-  ${CMAKE_CURRENT_SOURCE_DIR}/ldlidar_driver/src/core/ldlidar_driver.cpp
+  ${LDLIDAR_DRI_CORE} 
   ${LDLIDAR_DRI_DATARPC} 
   ${LDLIDAR_DRI_FILTER} 
   ${LDLIDAR_DRI_LOGGER} 

@@ -102,7 +102,8 @@ int main(int argc, char **argv) {
   if (ldlidarnode->WaitLidarCommConnect(3000)) {
     RCLCPP_INFO(node->get_logger(), "ldlidar communication is normal.");
   } else {
-    RCLCPP_WARN(node->get_logger(), "ldlidar communication is abnormal. Continuing anyway...");
+    RCLCPP_ERROR(node->get_logger(), "ldlidar communication is abnormal.");
+    exit(EXIT_FAILURE);
   }
 
   // create ldlidar data topic and publisher
