@@ -75,7 +75,7 @@ install_deps() {
     
     # Python deps
     echo -e "${BLUE}  Python пакеты...${NC}"
-    pip3 install --quiet 'numpy<2' aiohttp opencv-python-headless psutil 2>/dev/null || true
+    pip3 install --break-system-packages --quiet 'numpy<2' aiohttp opencv-python-headless psutil 2>/dev/null || true
     echo -e "${GREEN}  ✓ Python зависимости${NC}"
     echo ""
     
