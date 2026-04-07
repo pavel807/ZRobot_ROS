@@ -39,6 +39,9 @@ models/
 # Logs
 *.log
 
+# Convert folder
+convert/
+
 # Configuration overrides
 *.yaml.local
 !ldlidar_stl_ros2/ldlidar_driver/include/core/
