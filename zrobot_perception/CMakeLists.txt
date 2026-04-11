@@ -17,6 +17,7 @@ ament_python_install_package(${PROJECT_NAME}
 install(PROGRAMS
   src/${PROJECT_NAME}/yolo_detector_node.py
   DESTINATION lib/${PROJECT_NAME}
+  RENAME yolo_detector_node
 )
 
 # Install launch, config, and other resource directories

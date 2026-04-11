@@ -142,7 +142,7 @@ setup_models() {
 # ZRobot Configuration
 
 zrobot_perception:
-  model_path: "models/yolov8s.rknn"
+  model_path: "models/yolo26s-rk3588.rknn"
   camera_id: 1
   conf_threshold: 0.30
   target_object: "person"
@@ -170,10 +170,10 @@ EOF
         echo -e "${GREEN}✓ Конфиг zrobot_config.yaml найден${NC}"
     fi
     
-    if [ ! -f "models/yolov8s.rknn" ]; then
-        echo -e "${YELLOW}⚠ Модель не найдена! Поместите yolov8s.rknn в папку models/${NC}"
+    if [ ! -f "models/yolo26s-rk3588.rknn" ]; then
+        echo -e "${YELLOW}⚠ Модель не найдена! Поместите yolo26s-rk3588.rknn в папку models/${NC}"
     else
-        echo -e "${GREEN}✓ Модель yolov8s.rknn найдена${NC}"
+        echo -e "${GREEN}✓ Модель yolo26s-rk3588.rknn найдена${NC}"
     fi
     echo ""
 }

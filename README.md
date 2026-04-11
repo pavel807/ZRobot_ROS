@@ -54,7 +54,7 @@ ros2 launch zrobot_bringup zrobot_launch.py
 
 ```yaml
 zrobot_perception:
-  model_path: "models/yolov8s.rknn"  # путь к модели
+  model_path: "models/yolo26s-rk3588.rknn"  # путь к модели
   camera_id: 1                       # ID камеры
   conf_threshold: 0.30               # порог уверенности
 

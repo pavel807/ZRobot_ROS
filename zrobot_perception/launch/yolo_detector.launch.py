@@ -37,7 +37,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         DeclareLaunchArgument("config_file", default_value=config_file),
-        DeclareLaunchArgument("model_path", default_value="models/yolov8s.rknn"),
+        DeclareLaunchArgument("model_path", default_value="models/yolo26s-rk3588.rknn"),
         DeclareLaunchArgument("camera_id", default_value="1"),
         DeclareLaunchArgument("width", default_value="640"),
         DeclareLaunchArgument("height", default_value="640"),

@@ -4,7 +4,7 @@
 zrobot_perception:
   ros__parameters:
     # Model
-    model_path: "models/yolov8s.rknn"
+    model_path: "models/yolo26s-rk3588.rknn"
 
     # Camera
     camera_id: 1

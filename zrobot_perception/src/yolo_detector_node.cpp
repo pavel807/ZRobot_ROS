@@ -267,7 +267,7 @@ public:
                     COCO_CLASSES.size(), COCO_CATEGORIES.size());
 
         // Declare parameters
-        this->declare_parameter<std::string>("model_path", "models/yolov8n.rknn");
+        this->declare_parameter<std::string>("model_path", "models/yolo26s-rk3588.rknn");
         this->declare_parameter<int>("camera_id", 0);
         this->declare_parameter<int>("width", 640);
         this->declare_parameter<int>("height", 640);

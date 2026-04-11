@@ -45,7 +45,7 @@ def generate_launch_description():
             SetEnvironmentVariable("RMW_IMPLEMENTATION", "rmw_fastrtps_cpp"),
             UnsetEnvironmentVariable("FASTRTPS_DEFAULT_PROFILES_FILE"),
             DeclareLaunchArgument("config_file", default_value=config_file),
-            DeclareLaunchArgument("model_path", default_value="models/yolov8s.rknn"),
+            DeclareLaunchArgument("model_path", default_value="models/yolo26s-rk3588.rknn"),
             DeclareLaunchArgument("camera_id", default_value="1"),
             DeclareLaunchArgument("conf_threshold", default_value="0.30"),
             DeclareLaunchArgument("target_object", default_value="person"),

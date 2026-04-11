@@ -4,7 +4,7 @@ from rknn.api import RKNN
 from ultralytics.data.utils import check_det_dataset
 
 # --- НАСТРОЙКИ ---
-MODEL_NAME = "yolov8s"
+MODEL_NAME = "yolo26s"
 PLATFORM = "rk3588"  # Укажи свою: rk3562, rk3566, rk3568, rk3576, rk3588, rv1126
 DATASET_YAML = "coco128.yaml"
 CALIB_TXT = "dataset_calib_all.txt"

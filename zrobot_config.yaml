@@ -2,7 +2,7 @@
 # Main configuration file - used by launch and all nodes
 
 zrobot_perception:
-  model_path: "models/yolov8s.rknn"
+  model_path: "yolo26s_rknn_model/yolo26s_rk3588.rknn"
   camera_id: 1
   width: 640
   height: 640

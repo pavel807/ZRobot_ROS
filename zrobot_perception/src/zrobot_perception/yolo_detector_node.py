@@ -1,26 +1,30 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ROS2 Jazzy node for YOLO-based object detection using RKNN NPU.
-Replaces the C++ yolo_detector_node with a Python multiprocessing implementation.
+Advanced YOLO Detector Node — multiprocessing NPU inference (3 NPU cores on RK3588).
+ИСПРАВЛЕННАЯ ВЕРСИЯ:
+  ✅ NHWC вход (без транспонирования)
+  ✅ Без ручной сигмоиды (модель уже выдаёт вероятности)
+  ✅ Обратное масштабирование координат 640×640 → 640×480 (убирает смещение вниз)
+  ✅ Безопасная передача через mp.Queue (только Python-типы)
 """
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Image
 from vision_msgs.msg import Detection2DArray, Detection2D, ObjectHypothesisWithPose, ObjectHypothesis
-from geometry_msgs.msg import Twist, Point
+from geometry_msgs.msg import Twist
 from std_msgs.msg import String, Float32
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
 import multiprocessing as mp
-import os
 import time
+import os
+import json
 import threading
 from collections import deque
 
-# --- COCO Classes (80) ---
 COCO_CLASSES = {
     0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane', 5: 'bus',
     6: 'train', 7: 'truck', 8: 'boat', 9: 'traffic light', 10: 'fire hydrant',
@@ -41,48 +45,55 @@ COCO_CLASSES = {
     78: 'hair drier', 79: 'toothbrush'
 }
 
-# Reverse lookup
-COCO_CLASSES_REV = {v: k for k, v in COCO_CLASSES.items()}
+IMG_SIZE = 640
 
 
-# --- NPU Process ---
 def npu_process(core_id, input_queue, output_queue, model_path, obj_thresh, nms_thresh):
     """
-    Отдельный ПРОЦЕСС для каждого NPU ядра.
-    Импорт RKNN делаем здесь, чтобы избежать проблем с fork.
+    NPU worker process.
+    Вход: NHWC (1, 640, 640, 3), uint8 [0, 255]
+    Выход: (frame_id, список_детекций) — только Python-типы
     """
     from rknnlite.api import RKNNLite
 
-    # Привязываем процесс к конкретному CPU ядру для стабильности (RK3588 big cores: 4,5,6,7)
-    try:
-        os.sched_setaffinity(0, {4 + core_id})
-    except Exception:
-        pass  # Fallback if affinity fails
+    # Привязка к большому ядру CPU для стабильности
+    os.sched_setaffinity(0, {4 + core_id})
 
     rknn = RKNNLite()
-    rknn.load_rknn(model_path)
+    ret = rknn.load_rknn(model_path)
+    if ret != 0:
+        print(f"[NPU {core_id}] ❌ Failed to load model, exit", flush=True)
+        return
 
     core_masks = [RKNNLite.NPU_CORE_0, RKNNLite.NPU_CORE_1, RKNNLite.NPU_CORE_2]
-    rknn.init_runtime(core_mask=core_masks[core_id])
+    ret = rknn.init_runtime(core_mask=core_masks[core_id])
+    if ret != 0:
+        print(f"[NPU {core_id}] ❌ Failed to init runtime, exit", flush=True)
+        return
 
-    print(f"[NPU Core {core_id}] Started")
+    print(f"🚀 NPU Core {core_id} запущен", flush=True)
 
     while True:
         task = input_queue.get()
         if task is None:
             break
 
-        frame_id, rgb_frame = task
+        frame_id, rgb_array = task  # (640, 640, 3), dtype=uint8
 
-        # Inference
-        outputs = rknn.inference(inputs=[np.expand_dims(rgb_frame, 0)])
-        out = np.squeeze(outputs[0])
+        # ✅ ТОЛЬКО добавляем batch-измерение. НЕ транспонируем в NCHW.
+        input_data = np.expand_dims(rgb_array, axis=0)
 
-        # Post-processing
-        boxes_raw = out[:4, :].transpose()
-        probs = out[4:, :].transpose()
-        confidences = np.max(probs, axis=1)
-        class_ids = np.argmax(probs, axis=1)
+        # Инференс
+        outputs = rknn.inference(inputs=[input_data])
+        out = np.squeeze(outputs[0])  # shape: (84, 8400)
+
+        # Разделяем боксы и скоры
+        boxes_raw = out[:4, :].transpose()   # (8400, 4) — [cx, cy, w, h]
+        raw_scores = out[4:, :].transpose()  # (8400, 80) — class probabilities
+
+        # ✅ НЕ применяем sigmoid! Ultralytics RKNN export уже выдаёт вероятности
+        confidences = np.max(raw_scores, axis=1)
+        class_ids = np.argmax(raw_scores, axis=1)
 
         mask = confidences > obj_thresh
         conf = confidences[mask]
@@ -91,417 +102,318 @@ def npu_process(core_id, input_queue, output_queue, model_path, obj_thresh, nms_
 
         detections = []
         if len(conf) > 0:
+            # Конвертируем [cx, cy, w, h] → [x1, y1, w, h]
             boxes = np.empty_like(b_raw)
             boxes[:, 0] = b_raw[:, 0] - b_raw[:, 2] / 2
             boxes[:, 1] = b_raw[:, 1] - b_raw[:, 3] / 2
             boxes[:, 2] = b_raw[:, 2]
             boxes[:, 3] = b_raw[:, 3]
 
+            # NMS
             indices = cv2.dnn.NMSBoxes(boxes.tolist(), conf.tolist(), obj_thresh, nms_thresh)
             if len(indices) > 0:
                 indices = indices.flatten()
-                detections = [(boxes[i].tolist(), float(conf[i]), int(c_ids[i])) for i in indices]
+                # ✅ Чистые Python-типы для безопасной передачи через mp.Queue
+                detections = [(float(boxes[i][0]), float(boxes[i][1]),
+                               float(boxes[i][2]), float(boxes[i][3]),
+                               float(conf[i]), int(c_ids[i]))
+                              for i in indices]
 
-        output_queue.put((frame_id, rgb_frame, detections))
-
-
-# --- Capture Process ---
-def capture_process(camera_id, width, height, fps, prep_queue):
-    """Процесс захвата с максимальной скоростью"""
-    cap = cv2.VideoCapture(camera_id, cv2.CAP_V4L2)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-    cap.set(cv2.CAP_PROP_FPS, fps)
-    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-    cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-
-    if not cap.isOpened():
-        print("[Capture] Failed to open camera")
-        return
-
-    print(f"[Capture] Started: {width}x{height}@{fps}")
-    frame_id = 0
-
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-
-        # Preprocessing
-        if frame.shape[0] != height or frame.shape[1] != width:
-            frame = cv2.resize(frame, (width, height))
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-
-        if prep_queue.full():
-            try:
-                prep_queue.get_nowait()
-            except Exception:
-                pass
-        prep_queue.put((frame_id, rgb))
-        frame_id += 1
+        output_queue.put((frame_id, detections))
 
 
-# ============================================================================
-# YOLO Detector ROS2 Node
-# ============================================================================
 class YoloDetectorNode(Node):
     def __init__(self):
         super().__init__('yolo_detector')
+        self.get_logger().info('🔧 Initializing Advanced YOLO Detector...')
 
-        self.get_logger().info('Initializing YOLO Detector Node (RKNN NPU)...')
-
-        # --- Declare parameters ---
-        self.declare_parameter('model_path', 'models/yolov8n.rknn')
-        self.declare_parameter('camera_id', 0)
-        self.declare_parameter('width', 640)
-        self.declare_parameter('height', 640)
-        self.declare_parameter('fps', 30)
+        # Параметры
+        self.declare_parameter('model_path', 'models/yolo26s-rk3588.rknn')
+        self.declare_parameter('camera_id', 1)
         self.declare_parameter('obj_thresh', 0.25)
         self.declare_parameter('nms_thresh', 0.45)
-        self.declare_parameter('num_npu_cores', 3)
         self.declare_parameter('target_object', 'person')
-        self.declare_parameter('enable_tracking', True)
-        self.declare_parameter('show_category', True)
         self.declare_parameter('enable_auto_follow', True)
         self.declare_parameter('max_linear_speed', 0.3)
         self.declare_parameter('turn_speed', 0.5)
 
-        # --- Get parameters ---
         self.model_path = self.get_parameter('model_path').value
         self.camera_id = self.get_parameter('camera_id').value
-        self.width = self.get_parameter('width').value
-        self.height = self.get_parameter('height').value
-        self.fps = self.get_parameter('fps').value
         self.obj_thresh = self.get_parameter('obj_thresh').value
         self.nms_thresh = self.get_parameter('nms_thresh').value
-        self.num_npu_cores = self.get_parameter('num_npu_cores').value
         self.target_object = self.get_parameter('target_object').value
-        self.enable_tracking = self.get_parameter('enable_tracking').value
-        self.show_category = self.get_parameter('show_category').value
         self.enable_auto_follow = self.get_parameter('enable_auto_follow').value
         self.max_linear_speed = self.get_parameter('max_linear_speed').value
         self.turn_speed = self.get_parameter('turn_speed').value
 
-        self.get_logger().info(f'Model: {self.model_path}')
-        self.get_logger().info(f'Camera: {self.camera_id}, {self.width}x{self.height}@{self.fps}')
-        self.get_logger().info(f'Thresholds: obj={self.obj_thresh}, nms={self.nms_thresh}')
-        self.get_logger().info(f'NPU Cores: {self.num_npu_cores}')
-        self.get_logger().info(f'Target: {self.target_object}')
+        self.get_logger().info(f'📦 COCO Classes: {len(COCO_CLASSES)} objects')
 
-        # --- Publishers ---
+        # ROS2 publishers/subscribers
         self.detections_pub = self.create_publisher(Detection2DArray, 'detections', 10)
         self.image_pub = self.create_publisher(Image, 'processed_image', 10)
         self.status_pub = self.create_publisher(String, 'detection_status', 10)
         self.cmd_vel_pub = self.create_publisher(Twist, 'cmd_vel', 10)
 
-        # --- Subscriptions ---
-        self.target_sub = self.create_subscription(
-            String, 'set_target', self.target_callback, 10)
-        self.confidence_sub = self.create_subscription(
-            Float32, 'set_confidence', self.confidence_callback, 10)
+        self.target_sub = self.create_subscription(String, 'set_target', self.target_callback, 10)
+        self.conf_sub = self.create_subscription(Float32, 'set_confidence', self.confidence_callback, 10)
 
-        # --- Queues for multiprocessing ---
+        self.cv_bridge = CvBridge()
+
+        # Камера
+        self.cap = cv2.VideoCapture(self.camera_id)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
+        if not self.cap.isOpened():
+            self.get_logger().error(f'❌ Failed to open camera {self.camera_id}')
+            raise RuntimeError(f'Failed to open camera {self.camera_id}')
+
+        self.get_logger().info(f'📷 Camera initialized: 640x480 @ 30 FPS')
+
+        # ✅ Коэффициенты масштабирования: модель (640x640) → оригинал камеры (640x480)
+        self.scale_x = 640 / 640.0  # 1.0
+        self.scale_y = 480 / 640.0  # 0.75
+
+        # Shared multiprocessing queues
         self.prep_queue = mp.Queue(maxsize=6)
         self.result_queue = mp.Queue(maxsize=6)
 
-        # --- Launch NPU processes ---
+        # NPU workers
+        num_npu_cores = 3
         self.npu_processes = []
-        for i in range(self.num_npu_cores):
-            p = mp.Process(
-                target=npu_process,
-                args=(i, self.prep_queue, self.result_queue,
-                      self.model_path, self.obj_thresh, self.nms_thresh))
+        for i in range(num_npu_cores):
+            p = mp.Process(target=npu_process,
+                           args=(i, self.prep_queue, self.result_queue,
+                                 self.model_path, self.obj_thresh, self.nms_thresh))
             p.start()
             self.npu_processes.append(p)
 
-        # --- Launch capture process ---
-        self.cap_proc = mp.Process(
-            target=capture_process,
-            args=(self.camera_id, self.width, self.height, self.fps, self.prep_queue))
-        self.cap_proc.start()
+        self.get_logger().info(f'🧠 Model: {self.model_path} | NPU cores: {num_npu_cores}')
 
-        # --- State ---
-        self.cv_bridge = CvBridge()
-        self.current_frame = None
+        # Frame ring buffer
+        self.frame_buffer = {}
+        self.frame_buffer_lock = threading.Lock()
+        self.frame_id_counter = 0
+        self.max_buffer_size = 12
+
+        # Results
         self.current_detections = []
-        self.frame_lock = threading.Lock()
+        self.current_frame_id = 0
+        self.results_lock = threading.Lock()
 
-        # FPS / performance tracking
-        self.frame_count = 0
-        self.last_fps_time = self.get_clock().now()
-        self.current_fps = 0.0
-        self.inference_times = deque(maxlen=60)
+        # Collector thread
+        self.collector_thread = threading.Thread(target=self._collect_results, daemon=True)
+        self.collector_thread.start()
 
-        # Tracking state
-        self.tracker_history = {}
-        self.next_track_id = 0
+        # FPS tracking
+        self.fps_counter = {'count': 0, 'start': time.time(), 'fps': 0.0}
 
-        # Auto-follow state
-        self.last_detection_time = time.time()
-        self.search_start_time = time.time()
-        self.in_search_mode = False
-        self.search_direction = 1
-        self.speed_history_l = deque(maxlen=4)
-        self.speed_history_r = deque(maxlen=4)
+        # Main timer ~30 FPS
+        self.timer = self.create_timer(0.033, self.run_detection)
 
-        # Motor control params (mirrored from C++ node)
-        self.max_speed = 245
-        self.min_speed = 165
-        self.tracking_speed = 220
-        self.search_speed = 115
-        self.center_threshold = 0.08
-        self.max_turn_ratio = 0.95
-        self.approach_width = 120
+        self.get_logger().info('✅ Advanced YOLO Detector node STARTED')
 
-        # --- Timer for result collection ---
-        self.timer = self.create_timer(0.01, self.collect_results)  # 100 Hz
-
-        # --- Timer for detection publishing ---
-        self.publish_timer = self.create_timer(1.0 / self.fps, self.publish_detections)
-
-        self.get_logger().info('YOLO Detector Node started')
+    def _collect_results(self):
+        while True:
+            try:
+                frame_id, detections = self.result_queue.get(timeout=1.0)
+                with self.results_lock:
+                    self.current_detections = detections
+                    self.current_frame_id = frame_id
+            except Exception:
+                break
 
     def target_callback(self, msg: String):
-        if self.target_object != msg.data:
-            self.get_logger().info(f'Target changed to: {msg.data}')
-            self.target_object = msg.data
-            self.tracker_history.clear()
-            self.in_search_mode = False
-            self.search_direction = 1
+        self.target_object = msg.data
+        self.get_logger().info(f'🎯 Target changed to: {msg.data}')
 
     def confidence_callback(self, msg: Float32):
-        if 0.0 <= msg.data <= 1.0:
-            old = self.obj_thresh
-            self.obj_thresh = msg.data
-            self.get_logger().info(f'Confidence threshold: {old:.2f} -> {self.obj_thresh:.2f}')
+        self.obj_thresh = msg.data
+        self.get_logger().info(f'📊 Confidence threshold: {msg.data:.2f}')
+
+    def _scale_detections(self, detections):
+        """Конвертирует детекции из пространства модели (640×640) в пространство кадра (640×480)."""
+        scaled = []
+        for (x1, y1, w, h, score, cls_id) in detections:
+            x1 *= self.scale_x
+            y1 *= self.scale_y
+            w *= self.scale_x
+            h *= self.scale_y
+            # Ограничиваем координаты рамками кадра
+            x1 = max(0.0, x1)
+            y1 = max(0.0, y1)
+            w = max(0.0, min(w, 640.0 - x1))
+            h = max(0.0, min(h, 480.0 - y1))
+            scaled.append((x1, y1, w, h, score, cls_id))
+        return scaled
+
+    def run_detection(self):
+        ret, frame = self.cap.read()
+        if not ret:
+            return
+
+        # Preprocess
+        if frame.shape[0] != IMG_SIZE or frame.shape[1] != IMG_SIZE:
+            resized = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
         else:
-            self.get_logger().warn(f'Invalid confidence: {msg.data}')
+            resized = frame
+        rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
-    def collect_results(self):
-        """Collect results from NPU processes and update current frame"""
-        try:
-            while not self.result_queue.empty():
-                frame_id, rgb_frame, detections = self.result_queue.get_nowait()
+        # Store frame
+        fid = self.frame_id_counter
+        self.frame_id_counter += 1
+        with self.frame_buffer_lock:
+            self.frame_buffer[fid] = frame.copy()
+            if len(self.frame_buffer) > self.max_buffer_size:
+                oldest = min(self.frame_buffer.keys())
+                del self.frame_buffer[oldest]
 
-                t_start = time.time()
+        # Send to NPU
+        if not self.prep_queue.full():
+            self.prep_queue.put((fid, rgb))
 
-                # Convert to BGR for display
-                frame = cv2.cvtColor(rgb_frame, cv2.COLOR_RGB2BGR)
+        # Get results
+        with self.results_lock:
+            det_fid = self.current_frame_id
+            detections = list(self.current_detections)
 
-                # Draw detections
-                for (box, score, cls_id) in detections:
-                    x1, y1 = int(box[0]), int(box[1])
-                    x2, y2 = int(box[0] + box[2]), int(box[1] + box[3])
-                    class_name = COCO_CLASSES.get(cls_id, str(cls_id))
-                    label = f"{class_name} {score:.2f}"
+        # ✅ МАСШТАБИРУЕМ обратно в оригинальное разрешение
+        detections = self._scale_detections(detections)
 
-                    # Color by category
-                    color = self.get_category_color(class_name)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                    cv2.putText(frame, label, (x1, y1 - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+        # Retrieve display frame
+        display_frame = None
+        with self.frame_buffer_lock:
+            if det_fid in self.frame_buffer:
+                display_frame = self.frame_buffer[det_fid].copy()
+            elif self.frame_buffer:
+                display_frame = self.frame_buffer[max(self.frame_buffer.keys())].copy()
 
-                # Draw FPS
-                cv2.putText(frame, f"FPS: {self.current_fps:.1f}", (10, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                cv2.putText(frame, f"Target: {self.target_object}", (10, 60),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+        if display_frame is None:
+            display_frame = frame
 
-                mode_text = "SEARCHING" if self.in_search_mode else "TRACKING" if detections else "IDLE"
-                mode_color = (0, 165, 255) if self.in_search_mode else (0, 255, 0) if detections else (128, 128, 128)
-                cv2.putText(frame, mode_text, (frame.shape[1] - 140, 30),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.7, mode_color, 2)
+        # Draw detections
+        for (x1, y1, w, h, score, cls_id) in detections:
+            x1_i, y1_i = int(x1), int(y1)
+            x2_i, y2_i = int(x1 + w), int(y1 + h)
+            label = f"{COCO_CLASSES.get(cls_id, cls_id)} {score:.2f}"
+            
+            cv2.rectangle(display_frame, (x1_i, y1_i), (x2_i, y2_i), (0, 255, 0), 2)
+            cv2.putText(display_frame, label, (x1_i, y1_i - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-                with self.frame_lock:
-                    self.current_frame = frame
-                    self.current_detections = detections
-                    self.last_detection_time = time.time()
+        # FPS
+        self.fps_counter['count'] += 1
+        elapsed = time.time() - self.fps_counter['start']
+        if elapsed > 1.0:
+            self.fps_counter['fps'] = self.fps_counter['count'] / elapsed
+            self.fps_counter['count'] = 0
+            self.fps_counter['start'] = time.time()
 
-                t_end = time.time()
-                self.inference_times.append((t_end - t_start) * 1000)
+        self.publish_results(display_frame, detections)
 
-        except Exception:
-            pass
+    def get_zone(self, detections):
+        for (x1, y1, w, h, score, cls_id) in detections:
+            if COCO_CLASSES.get(cls_id, '') == self.target_object:
+                center_x = x1 + w / 2
+                normalized = center_x / 640.0
+                if normalized < 0.35:
+                    return 'LEFT'
+                elif normalized > 0.65:
+                    return 'RIGHT'
+                else:
+                    return 'CENTER'
+        return 'NONE'
 
-    def publish_detections(self):
-        """Publish detection messages and processed images"""
-        # Update FPS
-        self.frame_count += 1
-        now = self.get_clock().now()
-        elapsed = (now - self.last_fps_time).nanoseconds / 1e9
-        if elapsed >= 0.5:
-            self.current_fps = self.frame_count / elapsed
-            self.frame_count = 0
-            self.last_fps_time = now
-
-        with self.frame_lock:
-            if self.current_frame is None:
-                return
-            frame = self.current_frame.copy()
-            detections = self.current_detections.copy()
-
-        # Publish processed image
+    def publish_results(self, frame, detections):
         if self.image_pub.get_subscription_count() > 0:
-            header = rclpy.time.Time().to_msg()
-            header.stamp = self.get_clock().now().to_msg()
             img_msg = self.cv_bridge.cv2_to_imgmsg(frame, encoding='bgr8')
-            img_msg.header.stamp = header.stamp
+            img_msg.header.stamp = self.get_clock().now().to_msg()
+            img_msg.header.frame_id = 'camera'
             self.image_pub.publish(img_msg)
 
-        # Publish detections array
         if self.detections_pub.get_subscription_count() > 0:
             det_array = Detection2DArray()
             det_array.header.stamp = self.get_clock().now().to_msg()
             det_array.header.frame_id = 'camera'
 
-            for (box, score, cls_id) in detections:
+            for (x1, y1, w, h, score, cls_id) in detections:
                 det = Detection2D()
                 det.header = det_array.header
-
-                # Bounding box
-                det.bbox.center.position.x = box[0] + box[2] / 2
-                det.bbox.center.position.y = box[1] + box[3] / 2
-                det.bbox.size_x = float(box[2])
-                det.bbox.size_y = float(box[3])
-
-                # Object hypothesis
+                det.bbox.center.position.x = float(x1 + w / 2)
+                det.bbox.center.position.y = float(y1 + h / 2)
+                det.bbox.size_x = float(w)
+                det.bbox.size_y = float(h)
                 hypothesis = ObjectHypothesis()
                 hypothesis.class_id = COCO_CLASSES.get(cls_id, str(cls_id))
                 hypothesis.score = score
                 hyp_with_pose = ObjectHypothesisWithPose()
                 hyp_with_pose.hypothesis = hypothesis
                 det.results.append(hyp_with_pose)
-
                 det_array.detections.append(det)
 
             self.detections_pub.publish(det_array)
 
-        # Publish status
         if self.status_pub.get_subscription_count() > 0:
             status = String()
-            status.data = f"FPS:{self.current_fps:.1f}|Dets:{len(detections)}|Target:{self.target_object}"
+            status.data = json.dumps({
+                'target': self.target_object,
+                'found': len(detections) > 0,
+                'zone': self.get_zone(detections),
+                'count': len(detections),
+                'classes': ', '.join([COCO_CLASSES.get(cls_id, str(cls_id)) for _, _, _, _, _, cls_id in detections]),
+                'fps': self.fps_counter['fps']
+            })
             self.status_pub.publish(status)
 
-        # Auto-follow control
-        if self.enable_auto_follow and self.cmd_vel_pub.get_subscription_count() > 0:
+        if self.enable_auto_follow:
             self.publish_cmd_vel(detections, frame.shape[1])
 
     def publish_cmd_vel(self, detections, frame_width):
-        """Publish velocity commands for auto-follow"""
         twist = Twist()
-        found = len(detections) > 0
+        target_found = False
 
-        if not found:
-            # Search mode
-            if not self.in_search_mode:
-                self.in_search_mode = True
-                self.search_start_time = time.time()
-                self.search_direction = 1
-
-            elapsed = time.time() - self.search_start_time
-            if elapsed > 2.0:  # Switch direction every 2 seconds
-                self.search_direction *= -1
-                self.search_start_time = time.time()
-
-            if self.search_direction > 0:
-                twist.angular.z = -self.turn_speed * 0.5
-            else:
-                twist.angular.z = self.turn_speed * 0.5
-        else:
-            self.in_search_mode = False
-
-            # Find target detection
-            target_det = None
-            for (box, score, cls_id) in detections:
-                class_name = COCO_CLASSES.get(cls_id, '')
-                if class_name == self.target_object:
-                    target_det = (box, score, cls_id)
-                    break
-
-            if target_det is None and len(detections) > 0:
-                target_det = detections[0]  # Fallback to first detection
-
-            if target_det is not None:
-                box, score, cls_id = target_det
-                center_x = box[0] + box[2] / 2
+        for (x1, y1, w, h, score, cls_id) in detections:
+            if COCO_CLASSES.get(cls_id, '') == self.target_object:
+                target_found = True
+                center_x = x1 + w / 2
                 normalized_center = (center_x / frame_width) - 0.5
-
-                # Calculate turn speed proportional to deviation
                 turn = normalized_center * self.turn_speed
-                turn = max(-self.turn_speed, min(self.turn_speed, turn))
 
-                # Calculate approach speed based on object size
-                obj_width = box[2]
-                if obj_width > self.approach_width:
-                    distance_factor = (obj_width - self.approach_width) / 300.0
-                    distance_factor = min(1.0, distance_factor)
-                    scale = 1.0 - (distance_factor * 0.7)
-                    scale = max(0.25, scale)
-                    forward = self.max_linear_speed * scale
-                else:
-                    forward = self.max_linear_speed
-
-                # Apply center threshold
-                if abs(normalized_center) < self.center_threshold:
+                if abs(normalized_center) < 0.08:
                     twist.angular.z = 0.0
-                    twist.linear.x = forward
+                    twist.linear.x = self.max_linear_speed
                 else:
-                    twist.angular.z = -turn  # Negative because camera is inverted
-                    twist.linear.x = forward * 0.5  # Slow down while turning
+                    twist.angular.z = -turn
+                    twist.linear.x = self.max_linear_speed * 0.5
+                break
+
+        if not target_found:
+            twist.angular.z = self.turn_speed * 0.5
+            twist.linear.x = 0.0
 
         self.cmd_vel_pub.publish(twist)
 
-    def get_category_color(self, class_name: str):
-        """Get BGR color for category"""
-        # Simplified category colors
-        person = (0, 0, 255)        # Red
-        vehicle = (0, 255, 0)       # Green
-        animal = (255, 0, 0)        # Blue
-        food = (0, 255, 255)        # Yellow
-        electronic = (255, 0, 255)  # Magenta
-        default = (255, 255, 0)     # Cyan
-
-        if class_name == 'person':
-            return person
-        if class_name in ['bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat']:
-            return vehicle
-        if class_name in ['bird', 'cat', 'dog', 'horse', 'sheep', 'cow', 'elephant', 'bear',
-                          'zebra', 'giraffe']:
-            return animal
-        if class_name in ['apple', 'orange', 'banana', 'broccoli', 'carrot', 'sandwich', 'pizza',
-                          'donut', 'cake', 'hot dog', 'bowl', 'cup', 'wine glass', 'bottle']:
-            return food
-        if class_name in ['tv', 'laptop', 'mouse', 'keyboard', 'cell phone', 'remote', 'microwave',
-                          'oven', 'toaster', 'refrigerator']:
-            return electronic
-        return default
-
     def destroy_node(self):
-        """Cleanup on shutdown"""
-        self.get_logger().info('Shutting down YOLO Detector Node...')
-
-        # Stop NPU processes
+        self.get_logger().info('🛑 Shutting down YOLO Detector Node...')
         for _ in self.npu_processes:
             try:
                 self.prep_queue.put_nowait(None)
             except Exception:
                 pass
-
         for p in self.npu_processes:
             p.join(timeout=2)
             if p.is_alive():
                 p.terminate()
-
-        # Stop capture process
-        if self.cap_proc.is_alive():
-            self.cap_proc.terminate()
-            self.cap_proc.join(timeout=2)
-
+        if hasattr(self, 'cap') and self.cap.isOpened():
+            self.cap.release()
         super().destroy_node()
 
 
 def main(args=None):
-    mp.set_start_method('spawn', force=True)  # Critical for RKNN!
+    mp.set_start_method('spawn', force=True)
     rclpy.init(args=args)
     node = YoloDetectorNode()
     try:
@@ -509,8 +421,11 @@ def main(args=None):
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+            rclpy.shutdown()
+        except Exception:
+            pass
 
 
 if __name__ == '__main__':

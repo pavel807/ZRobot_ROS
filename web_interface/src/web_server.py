@@ -1192,8 +1192,11 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        try:
+            node.destroy_node()
+            rclpy.shutdown()
+        except rclpy._rclpy_pybind11.RCLError:
+            pass  # Already shut down by launch system
 
 
 if __name__ == '__main__':

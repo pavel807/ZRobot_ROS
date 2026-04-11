@@ -3,8 +3,8 @@
 
 zrobot_perception:
   ros__parameters:
-    # Модель — yolov8s (баланс точности/скорости)
-    model_path: "models/yolov8s.rknn"
+    # Модель — yolo26s (баланс точности/скорости)
+    model_path: "models/yolo26s-rk3588.rknn"
     camera_id: 1
     width: 640
     height: 640
