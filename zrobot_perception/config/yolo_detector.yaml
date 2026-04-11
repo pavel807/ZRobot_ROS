@@ -1,0 +1,30 @@
+# ZRobot Perception Configuration
+# Parameters for yolo_detector_node (Python RKNN)
+
+zrobot_perception:
+  ros__parameters:
+    # Model
+    model_path: "models/yolov8s.rknn"
+
+    # Camera
+    camera_id: 1
+    width: 640
+    height: 640
+    fps: 30
+
+    # Detection thresholds
+    obj_thresh: 0.25
+    nms_thresh: 0.45
+
+    # NPU
+    num_npu_cores: 3
+
+    # Target & tracking
+    target_object: "person"
+    enable_tracking: true
+    show_category: true
+
+    # Auto-follow
+    enable_auto_follow: true
+    max_linear_speed: 0.3
+    turn_speed: 0.5
