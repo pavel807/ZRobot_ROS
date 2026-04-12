@@ -479,9 +479,15 @@ class WebInterfaceNode(Node):
         if 'min_distance' in data:
             self.settings['min_safe_distance'] = data['min_distance']
             self.system_state['obstacle_avoidance']['min_safe_distance'] = data['min_distance']
+            config_msg = String()
+            config_msg.data = json.dumps({'min_safe_distance': data['min_distance']})
+            self.config_pub.publish(config_msg)
         if 'slow_distance' in data:
             self.settings['slow_down_distance'] = data['slow_distance']
             self.system_state['obstacle_avoidance']['slow_down_distance'] = data['slow_distance']
+            config_msg = String()
+            config_msg.data = json.dumps({'slow_down_distance': data['slow_distance']})
+            self.config_pub.publish(config_msg)
         return web.json_response({'success': True})
 
     async def handle_websocket(self, request):

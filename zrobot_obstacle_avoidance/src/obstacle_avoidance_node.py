@@ -11,6 +11,7 @@ from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool, String
 import math
 import time
+import json
 from collections import deque
 
 
@@ -66,6 +67,13 @@ class ObstacleAvoidanceNode(Node):
             10
         )
 
+        self.config_sub = self.create_subscription(
+            String,
+            'set_config',
+            self.config_callback,
+            10
+        )
+
         self.cmd_vel_safe_pub = self.create_publisher(Twist, 'cmd_vel_safe', 10)
         self.obstacle_pub = self.create_publisher(Bool, 'obstacle_detected', 10)
         self.status_pub = self.create_publisher(String, 'obstacle_status', 10)
@@ -103,6 +111,18 @@ class ObstacleAvoidanceNode(Node):
 
     def obstacle_enable_callback(self, msg: Bool):
         self.enabled = bool(msg.data)
+
+    def config_callback(self, msg: String):
+        try:
+            data = json.loads(msg.data)
+            if 'min_safe_distance' in data:
+                self.min_safe_distance = float(data['min_safe_distance'])
+                self.get_logger().info(f'Updated min_safe_distance: {self.min_safe_distance}')
+            if 'slow_down_distance' in data:
+                self.slow_down_distance = float(data['slow_down_distance'])
+                self.get_logger().info(f'Updated slow_down_distance: {self.slow_down_distance}')
+        except Exception as e:
+            self.get_logger().warn(f'Config parse error: {e}')
 
     def detection_callback(self, msg):
         try:

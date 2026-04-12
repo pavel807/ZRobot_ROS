@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Advanced YOLO Detector Node — multiprocessing NPU inference (3 NPU cores on RK3588).
-ИСПРАВЛЕННАЯ ВЕРСИЯ:
-  ✅ NHWC вход (без транспонирования)
-  ✅ Без ручной сигмоиды (модель уже выдаёт вероятности)
-  ✅ Обратное масштабирование координат 640×640 → 640×480 (убирает смещение вниз)
-  ✅ Безопасная передача через mp.Queue (только Python-типы)
+Advanced YOLO Detector Node — multiprocessing NPU inference (RK3588).
+СТАБИЛЬНАЯ ВЕРСИЯ:
+  ✅ Надёжный shutdown через mp.Event + таймауты очередей
+  ✅ Обработка переполнения очередей без блокировок
+  ✅ Корректное масштабирование координат 640×640 → 640×480
+  ✅ Безопасная передача данных (только Python-типы)
 """
 
 import rclpy
@@ -23,7 +23,8 @@ import time
 import os
 import json
 import threading
-from collections import deque
+import signal
+import sys
 
 COCO_CLASSES = {
     0: 'person', 1: 'bicycle', 2: 'car', 3: 'motorcycle', 4: 'airplane', 5: 'bus',
@@ -46,80 +47,99 @@ COCO_CLASSES = {
 }
 
 IMG_SIZE = 640
+QUEUE_TIMEOUT = 0.1  # секунды — предотвращает вечные блокировки
 
 
-def npu_process(core_id, input_queue, output_queue, model_path, obj_thresh, nms_thresh):
+def npu_process(core_id, input_queue, output_queue, model_path, obj_thresh, nms_thresh, shutdown_event):
     """
-    NPU worker process.
-    Вход: NHWC (1, 640, 640, 3), uint8 [0, 255]
-    Выход: (frame_id, список_детекций) — только Python-типы
+    NPU worker process с надёжной обработкой shutdown.
     """
     from rknnlite.api import RKNNLite
 
-    # Привязка к большому ядру CPU для стабильности
+    # Игнорируем SIGINT в дочернем процессе — shutdown управляется через Event
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     os.sched_setaffinity(0, {4 + core_id})
 
-    rknn = RKNNLite()
-    ret = rknn.load_rknn(model_path)
-    if ret != 0:
-        print(f"[NPU {core_id}] ❌ Failed to load model, exit", flush=True)
-        return
+    try:
+        rknn = RKNNLite()
+        ret = rknn.load_rknn(model_path)
+        if ret != 0:
+            print(f"[NPU {core_id}] ❌ Failed to load model", flush=True)
+            return
 
-    core_masks = [RKNNLite.NPU_CORE_0, RKNNLite.NPU_CORE_1, RKNNLite.NPU_CORE_2]
-    ret = rknn.init_runtime(core_mask=core_masks[core_id])
-    if ret != 0:
-        print(f"[NPU {core_id}] ❌ Failed to init runtime, exit", flush=True)
-        return
+        core_masks = [RKNNLite.NPU_CORE_0, RKNNLite.NPU_CORE_1, RKNNLite.NPU_CORE_2]
+        ret = rknn.init_runtime(core_mask=core_masks[core_id])
+        if ret != 0:
+            print(f"[NPU {core_id}] ❌ Failed to init runtime", flush=True)
+            return
 
-    print(f"🚀 NPU Core {core_id} запущен", flush=True)
+        print(f"🚀 NPU Core {core_id} запущен", flush=True)
 
-    while True:
-        task = input_queue.get()
-        if task is None:
-            break
+        while not shutdown_event.is_set():
+            try:
+                # ✅ Неблокирующее получение задачи с таймаутом
+                task = input_queue.get(timeout=QUEUE_TIMEOUT)
+            except Exception:
+                continue  # Таймаут или очередь пуста — продолжаем цикл
 
-        frame_id, rgb_array = task  # (640, 640, 3), dtype=uint8
+            if task is None:  # Сигнал завершения
+                break
 
-        # ✅ ТОЛЬКО добавляем batch-измерение. НЕ транспонируем в NCHW.
-        input_data = np.expand_dims(rgb_array, axis=0)
+            frame_id, rgb_array = task  # (640, 640, 3), uint8
 
-        # Инференс
-        outputs = rknn.inference(inputs=[input_data])
-        out = np.squeeze(outputs[0])  # shape: (84, 8400)
+            # Вход: NHWC (1, 640, 640, 3)
+            input_data = np.expand_dims(rgb_array, axis=0)
 
-        # Разделяем боксы и скоры
-        boxes_raw = out[:4, :].transpose()   # (8400, 4) — [cx, cy, w, h]
-        raw_scores = out[4:, :].transpose()  # (8400, 80) — class probabilities
+            # Инференс с замером времени
+            start_time = time.perf_counter()
+            outputs = rknn.inference(inputs=[input_data])
+            inference_time_ms = (time.perf_counter() - start_time) * 1000.0
+            out = np.squeeze(outputs[0])
 
-        # ✅ НЕ применяем sigmoid! Ultralytics RKNN export уже выдаёт вероятности
-        confidences = np.max(raw_scores, axis=1)
-        class_ids = np.argmax(raw_scores, axis=1)
+            # Постобработка
+            boxes_raw = out[:4, :].transpose()   # (8400, 4)
+            raw_scores = out[4:, :].transpose()  # (8400, 80)
 
-        mask = confidences > obj_thresh
-        conf = confidences[mask]
-        c_ids = class_ids[mask]
-        b_raw = boxes_raw[mask]
+            confidences = np.max(raw_scores, axis=1)
+            class_ids = np.argmax(raw_scores, axis=1)
 
-        detections = []
-        if len(conf) > 0:
-            # Конвертируем [cx, cy, w, h] → [x1, y1, w, h]
-            boxes = np.empty_like(b_raw)
-            boxes[:, 0] = b_raw[:, 0] - b_raw[:, 2] / 2
-            boxes[:, 1] = b_raw[:, 1] - b_raw[:, 3] / 2
-            boxes[:, 2] = b_raw[:, 2]
-            boxes[:, 3] = b_raw[:, 3]
+            mask = confidences > obj_thresh
+            conf = confidences[mask]
+            c_ids = class_ids[mask]
+            b_raw = boxes_raw[mask]
 
-            # NMS
-            indices = cv2.dnn.NMSBoxes(boxes.tolist(), conf.tolist(), obj_thresh, nms_thresh)
-            if len(indices) > 0:
-                indices = indices.flatten()
-                # ✅ Чистые Python-типы для безопасной передачи через mp.Queue
-                detections = [(float(boxes[i][0]), float(boxes[i][1]),
-                               float(boxes[i][2]), float(boxes[i][3]),
-                               float(conf[i]), int(c_ids[i]))
-                              for i in indices]
+            detections = []
+            if len(conf) > 0:
+                boxes = np.empty_like(b_raw)
+                boxes[:, 0] = b_raw[:, 0] - b_raw[:, 2] / 2
+                boxes[:, 1] = b_raw[:, 1] - b_raw[:, 3] / 2
+                boxes[:, 2] = b_raw[:, 2]
+                boxes[:, 3] = b_raw[:, 3]
 
-        output_queue.put((frame_id, detections))
+                indices = cv2.dnn.NMSBoxes(boxes.tolist(), conf.tolist(), obj_thresh, nms_thresh)
+                if len(indices) > 0:
+                    indices = indices.flatten()
+                    detections = [(float(boxes[i][0]), float(boxes[i][1]),
+                                   float(boxes[i][2]), float(boxes[i][3]),
+                                   float(conf[i]), int(c_ids[i]))
+                                  for i in indices]
+
+            # ✅ Неблокирующая отправка результата с таймаутом
+            try:
+                output_queue.put((frame_id, detections, inference_time_ms), timeout=QUEUE_TIMEOUT)
+            except Exception:
+                # Очередь переполнена или закрыта — пропускаем кадр, не блокируем процесс
+                pass
+
+    except Exception as e:
+        print(f"[NPU {core_id}] ❌ Error: {e}", flush=True)
+    finally:
+        # Гарантированная очистка ресурсов RKNN
+        try:
+            rknn.release()
+        except:
+            pass
+        print(f"[NPU {core_id}] 🛑 Завершён", flush=True)
 
 
 class YoloDetectorNode(Node):
@@ -173,58 +193,73 @@ class YoloDetectorNode(Node):
 
         self.get_logger().info(f'📷 Camera initialized: 640x480 @ 30 FPS')
 
-        # ✅ Коэффициенты масштабирования: модель (640x640) → оригинал камеры (640x480)
+        # Масштабирование координат: модель (640×640) → камера (640×480)
         self.scale_x = 640 / 640.0  # 1.0
         self.scale_y = 480 / 640.0  # 0.75
 
-        # Shared multiprocessing queues
-        self.prep_queue = mp.Queue(maxsize=6)
-        self.result_queue = mp.Queue(maxsize=6)
+        # ✅ Event для координации shutdown между процессами
+        self.shutdown_event = mp.Event()
 
-        # NPU workers
+        # Очереди с увеличенным размером для буферизации пиков
+        self.prep_queue = mp.Queue(maxsize=12)
+        self.result_queue = mp.Queue(maxsize=12)
+
+        # Запуск NPU workers
         num_npu_cores = 3
         self.npu_processes = []
         for i in range(num_npu_cores):
             p = mp.Process(target=npu_process,
                            args=(i, self.prep_queue, self.result_queue,
-                                 self.model_path, self.obj_thresh, self.nms_thresh))
+                                 self.model_path, self.obj_thresh, self.nms_thresh,
+                                 self.shutdown_event))
             p.start()
             self.npu_processes.append(p)
 
         self.get_logger().info(f'🧠 Model: {self.model_path} | NPU cores: {num_npu_cores}')
 
-        # Frame ring buffer
+        # Frame buffer
         self.frame_buffer = {}
         self.frame_buffer_lock = threading.Lock()
         self.frame_id_counter = 0
-        self.max_buffer_size = 12
+        self.max_buffer_size = 20  # Увеличен буфер для сглаживания пиков
 
-        # Results
+        # Результаты
         self.current_detections = []
         self.current_frame_id = 0
+        self.current_inference_time = 0.0
         self.results_lock = threading.Lock()
 
-        # Collector thread
+        # Collector thread с флагом завершения
+        self.collector_running = True
         self.collector_thread = threading.Thread(target=self._collect_results, daemon=True)
         self.collector_thread.start()
 
         # FPS tracking
         self.fps_counter = {'count': 0, 'start': time.time(), 'fps': 0.0}
 
-        # Main timer ~30 FPS
+        # Main timer
         self.timer = self.create_timer(0.033, self.run_detection)
 
         self.get_logger().info('✅ Advanced YOLO Detector node STARTED')
 
     def _collect_results(self):
-        while True:
+        """Collector thread с неблокирующим get() и проверкой shutdown."""
+        while self.collector_running and rclpy.ok():
             try:
-                frame_id, detections = self.result_queue.get(timeout=1.0)
+                # ✅ Неблокирующее получение с таймаутом
+                result = self.result_queue.get(timeout=QUEUE_TIMEOUT)
+                if len(result) == 3:
+                    frame_id, detections, inference_time_ms = result
+                else:
+                    frame_id, detections = result[0], result[1]
+                    inference_time_ms = 0.0
                 with self.results_lock:
                     self.current_detections = detections
                     self.current_frame_id = frame_id
+                    self.current_inference_time = inference_time_ms
             except Exception:
-                break
+                # Таймаут или ошибка — продолжаем цикл
+                continue
 
     def target_callback(self, msg: String):
         self.target_object = msg.data
@@ -235,19 +270,19 @@ class YoloDetectorNode(Node):
         self.get_logger().info(f'📊 Confidence threshold: {msg.data:.2f}')
 
     def _scale_detections(self, detections):
-        """Конвертирует детекции из пространства модели (640×640) в пространство кадра (640×480)."""
+        """Масштабирует детекции из пространства модели (640×640) в пространство кадра (640×480)."""
         scaled = []
         for (x1, y1, w, h, score, cls_id) in detections:
-            x1 *= self.scale_x
-            y1 *= self.scale_y
-            w *= self.scale_x
-            h *= self.scale_y
-            # Ограничиваем координаты рамками кадра
-            x1 = max(0.0, x1)
-            y1 = max(0.0, y1)
-            w = max(0.0, min(w, 640.0 - x1))
-            h = max(0.0, min(h, 480.0 - y1))
-            scaled.append((x1, y1, w, h, score, cls_id))
+            x1_s = x1 * self.scale_x
+            y1_s = y1 * self.scale_y
+            w_s = w * self.scale_x
+            h_s = h * self.scale_y
+            # Клампинг координат
+            x1_s = max(0.0, min(x1_s, 640.0))
+            y1_s = max(0.0, min(y1_s, 480.0))
+            w_s = max(0.0, min(w_s, 640.0 - x1_s))
+            h_s = max(0.0, min(h_s, 480.0 - y1_s))
+            scaled.append((x1_s, y1_s, w_s, h_s, score, cls_id))
         return scaled
 
     def run_detection(self):
@@ -271,16 +306,20 @@ class YoloDetectorNode(Node):
                 oldest = min(self.frame_buffer.keys())
                 del self.frame_buffer[oldest]
 
-        # Send to NPU
-        if not self.prep_queue.full():
-            self.prep_queue.put((fid, rgb))
+        # Send to NPU — неблокирующая отправка
+        try:
+            if not self.prep_queue.full():
+                self.prep_queue.put((fid, rgb), timeout=QUEUE_TIMEOUT)
+        except Exception:
+            # Очередь переполнена — пропускаем кадр, не блокируем главный поток
+            pass
 
         # Get results
         with self.results_lock:
             det_fid = self.current_frame_id
             detections = list(self.current_detections)
 
-        # ✅ МАСШТАБИРУЕМ обратно в оригинальное разрешение
+        # Масштабируем детекции
         detections = self._scale_detections(detections)
 
         # Retrieve display frame
@@ -299,8 +338,7 @@ class YoloDetectorNode(Node):
             x1_i, y1_i = int(x1), int(y1)
             x2_i, y2_i = int(x1 + w), int(y1 + h)
             label = f"{COCO_CLASSES.get(cls_id, cls_id)} {score:.2f}"
-            
-            cv2.rectangle(display_frame, (x1_i, y1_i), (x2_i, y2_i), (0, 255, 0), 2)
+            cv2.rectangle(display_frame, (x1_i, y1_i), (x2_i, y2_i), (0, 255, 0), 1)
             cv2.putText(display_frame, label, (x1_i, y1_i - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
@@ -357,14 +395,19 @@ class YoloDetectorNode(Node):
             self.detections_pub.publish(det_array)
 
         if self.status_pub.get_subscription_count() > 0:
+            inference_time = self.current_inference_time
+            # Проверяем только целевой объект
+            target_found = any(COCO_CLASSES.get(cls_id, '') == self.target_object 
+                           for (_, _, _, _, _, cls_id) in detections)
             status = String()
             status.data = json.dumps({
                 'target': self.target_object,
-                'found': len(detections) > 0,
+                'found': target_found,
                 'zone': self.get_zone(detections),
                 'count': len(detections),
                 'classes': ', '.join([COCO_CLASSES.get(cls_id, str(cls_id)) for _, _, _, _, _, cls_id in detections]),
-                'fps': self.fps_counter['fps']
+                'fps': self.fps_counter['fps'],
+                'inference_time': inference_time
             })
             self.status_pub.publish(status)
 
@@ -396,26 +439,73 @@ class YoloDetectorNode(Node):
 
         self.cmd_vel_pub.publish(twist)
 
-    def destroy_node(self):
-        self.get_logger().info('🛑 Shutting down YOLO Detector Node...')
+    def _shutdown_npu_workers(self):
+        """Корректное завершение NPU-процессов."""
+        self.get_logger().info('🛑 Stopping NPU workers...')
+        
+        # 1. Сигнализируем работникам о завершении
+        self.shutdown_event.set()
+        
+        # 2. Отправляем сигнал завершения в очереди (на случай, если работники ждут задачи)
         for _ in self.npu_processes:
             try:
                 self.prep_queue.put_nowait(None)
-            except Exception:
+            except:
                 pass
-        for p in self.npu_processes:
-            p.join(timeout=2)
+        
+        # 3. Ждём завершения процессов с таймаутом
+        for i, p in enumerate(self.npu_processes):
             if p.is_alive():
-                p.terminate()
+                p.join(timeout=2.0)
+                if p.is_alive():
+                    self.get_logger().warn(f'NPU process {i} не завершился, отправляем terminate...')
+                    p.terminate()
+                    p.join(timeout=1.0)
+        
+        # 4. Очищаем очереди
+        while not self.prep_queue.empty():
+            try:
+                self.prep_queue.get_nowait()
+            except:
+                break
+        while not self.result_queue.empty():
+            try:
+                self.result_queue.get_nowait()
+            except:
+                break
+
+    def destroy_node(self):
+        self.get_logger().info('🛑 Shutting down YOLO Detector Node...')
+        
+        # Останавливаем collector thread
+        self.collector_running = False
+        
+        # Корректно завершаем NPU-процессы
+        self._shutdown_npu_workers()
+        
+        # Освобождаем камеру
         if hasattr(self, 'cap') and self.cap.isOpened():
             self.cap.release()
+        
+        # Закрываем очереди
+        try:
+            self.prep_queue.close()
+            self.prep_queue.join_thread()
+            self.result_queue.close()
+            self.result_queue.join_thread()
+        except:
+            pass
+        
         super().destroy_node()
 
 
 def main(args=None):
+    # ✅ 'spawn' обязателен для RKNN на Linux
     mp.set_start_method('spawn', force=True)
+    
     rclpy.init(args=args)
     node = YoloDetectorNode()
+    
     try:
         rclpy.spin(node)
     except KeyboardInterrupt:
