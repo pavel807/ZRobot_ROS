@@ -15,9 +15,22 @@
 
 ```bash
 sudo apt update
-sudo apt install -y \
-    ros-jazzy-cv-bridge ros-jazzy-vision-msgs ros-jazzy-image-transport \
-    python3-aiohttp python3-opencv libyaml-cpp-dev
+sudo apt-get install -y -qq \
+            ros-$ROS_DISTRO-cv-bridge \
+            ros-$ROS_DISTRO-vision-msgs \
+            ros-$ROS_DISTRO-image-transport \
+            ros-$ROS_DISTRO-libopencv-dev \
+            ros-$ROS_DISTRO-sensor-msgs \
+            ros-$ROS_DISTRO-geometry-msgs \
+            ros-$ROS_DISTRO-std-msgs \
+            ros-$ROS_DISTRO-rclcpp \
+            ros-$ROS_DISTRO-rclpy \
+            ros-$ROS_DISTRO-message-filters \
+            python3-aiohttp \
+            python3-numpy \
+            python3-opencv \
+            python3-psutil \
+            libyaml-cpp-dev \
 ```
 
 ### 2. Сборка
