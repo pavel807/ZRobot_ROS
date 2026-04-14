@@ -55,6 +55,8 @@ class WebInterfaceNode(Node):
             String, 'obstacle_status', self.obstacle_status_callback, 10)
         self.lidar_sub = self.create_subscription(
             String, 'lidar_status', self.lidar_callback, 10)
+        self.lidar_scan_sub = self.create_subscription(
+            String, 'lidar_scan', self.lidar_scan_callback, 10)
 
         self.target_pub = self.create_publisher(String, 'set_target', 10)
         self.confidence_pub = self.create_publisher(Float32, 'set_confidence', 10)
@@ -129,7 +131,8 @@ class WebInterfaceNode(Node):
                 'fps': 0,
                 'range_max': 0.0,
                 'points': 0,
-                'error': None
+                'error': None,
+                'scan_data': None
             },
             'camera': {
                 'id': 1,
@@ -202,10 +205,27 @@ class WebInterfaceNode(Node):
 
     def detections_callback(self, msg):
         self.system_state['detection']['detections_count'] = len(msg.detections)
+        objects_list = []
         if msg.detections:
-            scores = [det.results[0].hypothesis.score for det in msg.detections if det.results]
+            scores = []
+            for det in msg.detections:
+                if det.results:
+                    hyp = det.results[0].hypothesis
+                    scores.append(hyp.score)
+                    bbox = det.bbox
+                    objects_list.append({
+                        'class': hyp.class_id,
+                        'confidence': round(hyp.score, 3),
+                        'x': round(bbox.center.position.x - bbox.size_x / 2, 1),
+                        'y': round(bbox.center.position.y - bbox.size_y / 2, 1),
+                        'w': round(bbox.size_x, 1),
+                        'h': round(bbox.size_y, 1),
+                        'cx': round(bbox.center.position.x, 1),
+                        'cy': round(bbox.center.position.y, 1)
+                    })
             if scores:
                 self.system_state['detection']['confidence'] = max(scores)
+        self.system_state['detection']['objects'] = objects_list
 
     def tracked_callback(self, msg):
         try:
@@ -270,6 +290,13 @@ class WebInterfaceNode(Node):
                 'points': data.get('points', 0),
                 'error': data.get('error')
             })
+        except:
+            pass
+
+    def lidar_scan_callback(self, msg):
+        try:
+            data = json.loads(msg.data)
+            self.system_state['lidar']['scan_data'] = data
         except:
             pass
 
@@ -572,170 +599,214 @@ class WebInterfaceNode(Node):
 
     def _get_html(self):
         return """<!DOCTYPE html>
-<html lang="en">
+<html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ZRobot Control Center</title>
+    <title>ZRobot - Центр Управления</title>
     <style>
-        :root {
-            --primary: #00d9ff;
-            --secondary: #7b2cbf;
-            --success: #00ff88;
-            --warning: #ffaa00;
-            --danger: #ff4466;
-            --bg-dark: #0f0f1a;
-            --bg-card: #1a1a2e;
-            --bg-panel: #16213e;
-            --text-primary: #ffffff;
-            --text-secondary: #a0a0b0;
-        }
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-            background: linear-gradient(135deg, var(--bg-dark) 0%, #1a1a3e 100%);
-            color: var(--text-primary);
+            font-family: 'Courier New', Courier, monospace;
+            background: #000000;
+            color: #00ff41;
             min-height: 100vh;
+            overflow-x: hidden;
+        }
+        /* Scanline effect */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 255, 65, 0.03),
+                rgba(0, 255, 65, 0.03) 1px,
+                transparent 1px,
+                transparent 3px
+            );
+            pointer-events: none;
+            z-index: 1000;
         }
         .header {
-            background: linear-gradient(90deg, var(--bg-card) 0%, var(--bg-panel) 100%);
-            padding: 15px 30px;
+            background: #0a0a0a;
+            padding: 12px 20px;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            border-bottom: 2px solid var(--primary);
+            border-bottom: 2px solid #00ff41;
+            box-shadow: 0 2px 10px rgba(0, 255, 65, 0.3);
         }
         .header h1 {
-            font-size: 22px;
-            background: linear-gradient(90deg, var(--primary), var(--success));
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
+            font-size: 20px;
+            color: #00ff41;
+            text-shadow: 0 0 10px #00ff41, 0 0 20px #00ff41;
+            letter-spacing: 3px;
         }
-        .header-status { display: flex; gap: 15px; align-items: center; }
-        .status-indicator {
-            display: flex; align-items: center; gap: 8px;
-            padding: 6px 12px; background: var(--bg-dark);
-            border-radius: 15px; font-size: 13px;
-        }
+        .header-status { display: flex; gap: 15px; align-items: center; font-size: 13px; }
+        .status-indicator { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border: 1px solid #00ff41; }
         .status-dot {
-            width: 8px; height: 8px; border-radius: 50%;
-            animation: pulse 2s infinite;
+            width: 8px; height: 8px;
+            animation: pulse 1.5s infinite;
         }
-        .status-dot.connected { background: var(--success); }
-        .status-dot.disconnected { background: var(--danger); }
-        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
-        
+        .status-dot.connected { background: #00ff41; box-shadow: 0 0 8px #00ff41; }
+        .status-dot.disconnected { background: #ff0040; box-shadow: 0 0 8px #ff0040; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+
         .main-container {
             display: grid;
-            grid-template-columns: 1fr 380px;
-            gap: 20px;
-            padding: 20px;
+            grid-template-columns: 1fr 400px;
+            gap: 15px;
+            padding: 15px;
             max-width: 1800px;
             margin: 0 auto;
         }
-        .video-section { display: flex; flex-direction: column; gap: 15px; }
+        .video-section { display: flex; flex-direction: column; gap: 12px; }
         .video-container {
-            background: var(--bg-card); border-radius: 12px; overflow: hidden;
-            box-shadow: 0 8px 32px rgba(0,0,0,0.4);
+            border: 2px solid #00ff41;
+            box-shadow: 0 0 15px rgba(0, 255, 65, 0.2);
+            background: #0a0a0a;
         }
         #videoCanvas { width: 100%; display: block; background: #000; }
-        
+
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
-            gap: 10px;
+            grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+            gap: 8px;
         }
         .stat-card {
-            background: var(--bg-panel); border-radius: 8px; padding: 12px;
-            text-align: center; border: 1px solid rgba(0,217,255,0.15);
+            background: #0a0a0a;
+            border: 1px solid #00ff41;
+            padding: 10px;
+            text-align: center;
         }
-        .stat-label { font-size: 10px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 1px; }
-        .stat-value { font-size: 18px; font-weight: bold; color: var(--primary); margin-top: 4px; }
-        .stat-value.success { color: var(--success); }
-        .stat-value.warning { color: var(--warning); }
-        .stat-value.danger { color: var(--danger); }
-        
-        .sidebar { display: flex; flex-direction: column; gap: 15px; }
+        .stat-label {
+            font-size: 9px;
+            color: #00aa30;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            margin-bottom: 4px;
+        }
+        .stat-value {
+            font-size: 16px;
+            font-weight: bold;
+            color: #00ff41;
+            text-shadow: 0 0 5px #00ff41;
+        }
+        .stat-value.success { color: #00ff41; text-shadow: 0 0 5px #00ff41; }
+        .stat-value.warning { color: #ffaa00; text-shadow: 0 0 5px #ffaa00; }
+        .stat-value.danger { color: #ff0040; text-shadow: 0 0 5px #ff0040; }
+
+        .sidebar { display: flex; flex-direction: column; gap: 12px; }
         .panel {
-            background: var(--bg-card); border-radius: 12px; padding: 15px;
-            border: 1px solid rgba(0,217,255,0.15);
+            background: #0a0a0a;
+            border: 1px solid #00ff41;
+            padding: 12px;
         }
-        .panel-title { font-size: 14px; font-weight: 600; color: var(--primary); margin-bottom: 12px; }
-        
+        .panel-title {
+            font-size: 13px;
+            font-weight: bold;
+            color: #00ff41;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+            letter-spacing: 2px;
+            border-bottom: 1px solid #00aa30;
+            padding-bottom: 5px;
+        }
+
         .setting-row {
             display: flex; justify-content: space-between; align-items: center;
-            padding: 8px 0; border-bottom: 1px solid rgba(255,255,255,0.05);
+            padding: 6px 0; border-bottom: 1px solid #003300;
         }
-        .setting-row label { font-size: 13px; color: var(--text-secondary); }
-        
+        .setting-row label { font-size: 12px; color: #00aa30; }
+
+        /* Rectangular toggle switch */
         .toggle-switch {
-            position: relative; width: 44px; height: 24px;
+            position: relative; width: 48px; height: 22px;
         }
         .toggle-switch input { opacity: 0; width: 0; height: 0; }
         .toggle-slider {
             position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-            background: var(--bg-dark); border-radius: 24px; transition: 0.3s;
-            border: 1px solid rgba(0,217,255,0.3);
+            background: #111; border: 1px solid #00ff41; transition: 0.2s;
         }
         .toggle-slider:before {
-            position: absolute; content: ""; height: 16px; width: 16px;
-            left: 3px; bottom: 3px; background: var(--text-secondary);
-            border-radius: 50%; transition: 0.3s;
+            position: absolute; content: ""; height: 14px; width: 14px;
+            left: 3px; bottom: 3px; background: #00aa30;
+            transition: 0.2s;
         }
-        .toggle-switch input:checked + .toggle-slider { background: var(--primary); }
-        .toggle-switch input:checked + .toggle-slider:before { transform: translateX(20px); background: #fff; }
-        
+        .toggle-switch input:checked + .toggle-slider { background: #003300; }
+        .toggle-switch input:checked + .toggle-slider:before { transform: translateX(26px); background: #00ff41; box-shadow: 0 0 5px #00ff41; }
+
         select, input[type="range"] {
-            width: 100%; padding: 8px; background: var(--bg-dark);
-            border: 1px solid rgba(0,217,255,0.3); border-radius: 6px;
-            color: var(--text-primary); font-size: 13px;
+            width: 100%; padding: 6px; background: #111;
+            border: 1px solid #00ff41;
+            color: #00ff41; font-size: 12px; font-family: 'Courier New', monospace;
         }
-        select:focus, input:focus { outline: none; border-color: var(--primary); }
-        
+        select { appearance: none; cursor: pointer; }
+        select:focus, input:focus { outline: none; box-shadow: 0 0 5px #00ff41; }
+        input[type="range"] { -webkit-appearance: none; height: 8px; cursor: pointer; }
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none; width: 14px; height: 14px;
+            background: #00ff41; border: 1px solid #00aa30; cursor: pointer;
+        }
+
+        /* Rectangular motor buttons */
         .motor-grid {
-            display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px;
+            display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px;
         }
         .motor-btn {
-            padding: 15px; font-size: 18px; background: var(--bg-dark);
-            border: 2px solid var(--primary); border-radius: 8px;
-            color: var(--primary); cursor: pointer; transition: all 0.2s;
+            padding: 12px; font-size: 16px; font-family: 'Courier New', monospace;
+            background: #111; border: 2px solid #00ff41;
+            color: #00ff41; cursor: pointer; transition: all 0.15s;
+            text-shadow: 0 0 5px #00ff41;
         }
-        .motor-btn:hover { background: var(--primary); color: var(--bg-dark); }
-        .motor-btn.stop { border-color: var(--danger); color: var(--danger); }
-        .motor-btn.stop:hover { background: var(--danger); color: #fff; }
-        
-        .detections-list { max-height: 150px; overflow-y: auto; }
-        .detection-item {
+        .motor-btn:hover { background: #00ff41; color: #000; }
+        .motor-btn:active { transform: scale(0.95); }
+        .motor-btn.stop { border-color: #ff0040; color: #ff0040; }
+        .motor-btn.stop:hover { background: #ff0040; color: #000; }
+
+        .obstacle-status { text-align: center; padding: 12px; }
+        .obstacle-status.clear { border-color: #00ff41; background: rgba(0, 255, 65, 0.05); }
+        .obstacle-status.warning { border-color: #ffaa00; background: rgba(255, 170, 0, 0.05); }
+        .obstacle-status.blocked { border-color: #ff0040; background: rgba(255, 0, 64, 0.05); }
+        .obstacle-status .panel-title { border-bottom-color: inherit; }
+
+        #lidarCanvas {
+            border: 2px solid #00ff41;
+            image-rendering: pixelated;
+        }
+
+        .logs-panel { max-height: 180px; overflow-y: auto; }
+        .log-item {
+            padding: 4px 8px; font-size: 10px;
+            border-bottom: 1px solid #003300;
+        }
+        .log-item.INFO { color: #00aa30; }
+        .log-item.WARN { color: #ffaa00; }
+        .log-item.ERROR { color: #ff0040; }
+
+        .objects-list { max-height: 250px; overflow-y: auto; }
+        .object-item {
             display: flex; justify-content: space-between; align-items: center;
-            padding: 8px; background: var(--bg-dark); border-radius: 5px;
-            margin-bottom: 5px; border-left: 3px solid var(--primary);
+            padding: 6px 8px; margin: 3px 0; background: #111;
+            border: 1px solid #003300; cursor: pointer; transition: all 0.15s;
         }
-        .detection-class { font-weight: 600; color: var(--primary); font-size: 13px; }
-        .detection-score { background: var(--primary); padding: 2px 8px; border-radius: 10px; font-size: 11px; font-weight: bold; color: var(--bg-dark); }
-        
-        .logs-panel { max-height: 200px; overflow-y: auto; }
-        .log-item { padding: 5px 8px; font-size: 11px; font-family: monospace; border-bottom: 1px solid rgba(255,255,255,0.05); }
-        .log-item.INFO { color: var(--text-secondary); }
-        .log-item.WARN { color: var(--warning); }
-        .log-item.ERROR { color: var(--danger); }
-        
-        .alert-banner {
-            background: linear-gradient(90deg, var(--danger), #ff0044);
-            color: white; padding: 10px 20px; border-radius: 8px;
-            margin-bottom: 15px; display: none; animation: slideIn 0.3s;
+        .object-item:hover { background: #003300; border-color: #00ff41; }
+        .object-item.active { background: #003300; border-color: #00ff41; box-shadow: 0 0 5px rgba(0, 255, 65, 0.3); }
+        .object-name { font-size: 11px; color: #00ff41; }
+        .object-conf { font-size: 10px; color: #00aa30; }
+        .object-item.active .object-name { color: #00ff41; text-shadow: 0 0 5px #00ff41; }
+
+        .video-container { position: relative; }
+        #videoOverlay {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            cursor: crosshair;
         }
-        .alert-banner.show { display: block; }
-        @keyframes slideIn { from { transform: translateY(-20px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
-        
+
         .sidebar-right {
-            display: flex; flex-direction: column; gap: 15px;
+            display: flex; flex-direction: column; gap: 12px;
             grid-column: 2; grid-row: 1 / 3;
         }
-        .obstacle-status { text-align: center; padding: 15px; }
-        .obstacle-status.clear { background: rgba(0,255,136,0.1); border: 1px solid var(--success); border-radius: 8px; }
-        .obstacle-status.warning { background: rgba(255,170,0,0.1); border: 1px solid var(--warning); border-radius: 8px; }
-        .obstacle-status.blocked { background: rgba(255,68,102,0.1); border: 1px solid var(--danger); border-radius: 8px; }
-        
         @media (max-width: 1200px) {
             .main-container { grid-template-columns: 1fr; }
             .sidebar-right { grid-column: 1; grid-row: auto; }
@@ -744,38 +815,39 @@ class WebInterfaceNode(Node):
 </head>
 <body>
     <header class="header">
-        <h1>ZRobot Control Center</h1>
+        <h1>> ZROBOT_CTRL_CENTER_</h1>
         <div class="header-status">
             <div class="status-indicator">
                 <span class="status-dot" id="wsStatus"></span>
-                <span id="wsStatusText">Connecting...</span>
+                <span id="wsStatusText">ПОДКЛЮЧЕНИЕ...</span>
             </div>
             <div class="status-indicator">
-                <span>Uptime:</span>
+                <span>АПТАЙМ:</span>
                 <span id="uptimeDisplay">0:00:00</span>
             </div>
         </div>
     </header>
 
-    <!-- Alerts disabled to reduce UI lag -->
-
     <div class="main-container">
         <div class="video-section">
-            <div class="video-container">
-                <canvas id="videoCanvas" width="800" height="480"></canvas>
+            <div class="panel">
+                <div class="video-container">
+                    <canvas id="videoCanvas" width="800" height="480"></canvas>
+                    <canvas id="videoOverlay" width="800" height="480"></canvas>
+                </div>
             </div>
-            
+
             <div class="stats-grid">
                 <div class="stat-card">
-                    <div class="stat-label">Target</div>
+                    <div class="stat-label">Цель</div>
                     <div class="stat-value" id="targetDisplay">-</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Found</div>
+                    <div class="stat-label">Найдена</div>
                     <div class="stat-value" id="foundDisplay">-</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Zone</div>
+                    <div class="stat-label">Зона</div>
                     <div class="stat-value" id="zoneDisplay">-</div>
                 </div>
                 <div class="stat-card">
@@ -783,15 +855,15 @@ class WebInterfaceNode(Node):
                     <div class="stat-value" id="fpsDisplay">0</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Inference</div>
+                    <div class="stat-label">Задержка</div>
                     <div class="stat-value" id="latencyDisplay">0ms</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Detections</div>
+                    <div class="stat-label">Объекты</div>
                     <div class="stat-value" id="detectionsDisplay">0</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Tracked</div>
+                    <div class="stat-label">Трекинг</div>
                     <div class="stat-value" id="trackedDisplay">0</div>
                 </div>
                 <div class="stat-card">
@@ -799,7 +871,7 @@ class WebInterfaceNode(Node):
                     <div class="stat-value" id="cpuDisplay">0%</div>
                 </div>
                 <div class="stat-card">
-                    <div class="stat-label">Memory</div>
+                    <div class="stat-label">RAM</div>
                     <div class="stat-value" id="memDisplay">0MB</div>
                 </div>
             </div>
@@ -807,14 +879,14 @@ class WebInterfaceNode(Node):
 
         <div class="sidebar-right">
             <div class="panel obstacle-status" id="obstaclePanel">
-                <div class="panel-title">Obstacle Avoidance</div>
-                <div style="font-size: 28px; margin: 10px 0;" id="obstacleIcon">✓</div>
-                <div id="obstacleText">Clear</div>
-                <div style="font-size: 12px; color: var(--text-secondary); margin-top: 8px;">
-                    Distance: <span id="obstacleDistance">--</span>m
+                <div class="panel-title">Обход Препятствий</div>
+                <div style="font-size: 32px; margin: 8px 0; text-shadow: 0 0 15px currentColor;" id="obstacleIcon">[OK]</div>
+                <div id="obstacleText" style="font-size: 14px; letter-spacing: 2px;">ПРОХОД ЯСЕН</div>
+                <div style="font-size: 11px; color: #00aa30; margin-top: 6px;">
+                    ДИСТАНЦИЯ: <span id="obstacleDistance" style="color: #00ff41;">--</span> м
                 </div>
-                <div class="setting-row" style="margin-top: 15px;">
-                    <label>Enabled</label>
+                <div class="setting-row" style="margin-top: 10px;">
+                    <label>АКТИВНО</label>
                     <label class="toggle-switch">
                         <input type="checkbox" id="obstacleToggle" checked onchange="toggleObstacle(this.checked)">
                         <span class="toggle-slider"></span>
@@ -823,148 +895,172 @@ class WebInterfaceNode(Node):
             </div>
 
             <div class="panel">
-                <div class="panel-title">Motor Status</div>
-                <div class="stats-grid" style="margin-bottom: 10px;">
+                <div class="panel-title">Управление Двигателем</div>
+                <div class="stats-grid" style="margin-bottom: 8px;">
                     <div class="stat-card">
-                        <div class="stat-label">Status</div>
-                        <div class="stat-value" id="motorStatus">OFF</div>
+                        <div class="stat-label">Статус</div>
+                        <div class="stat-value" id="motorStatus">ВЫКЛ</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">Speed</div>
+                        <div class="stat-label">Скорость</div>
                         <div class="stat-value" id="motorSpeed">0</div>
                     </div>
                 </div>
                 <div class="motor-grid">
-                    <button class="motor-btn" onmousedown="startMotor(0.5, 0)" onmouseup="stopMotor()" ontouchstart="startMotor(0.5, 0)" ontouchend="stopMotor()">↑</button>
+                    <button class="motor-btn" onmousedown="startMotor(0.5, 0)" onmouseup="stopMotor()" ontouchstart="startMotor(0.5, 0)" ontouchend="stopMotor()">▲</button>
                     <button class="motor-btn stop" onclick="sendStop()">■</button>
-                    <button class="motor-btn" onmousedown="startMotor(-0.5, 0)" onmouseup="stopMotor()" ontouchstart="startMotor(-0.5, 0)" ontouchend="stopMotor()">↓</button>
-                    <button class="motor-btn" onmousedown="startMotor(0, 0.5)" onmouseup="stopMotor()" ontouchstart="startMotor(0, 0.5)" ontouchend="stopMotor()">←</button>
+                    <button class="motor-btn" onmousedown="startMotor(-0.5, 0)" onmouseup="stopMotor()" ontouchstart="startMotor(-0.5, 0)" ontouchend="stopMotor()">▼</button>
+                    <button class="motor-btn" onmousedown="startMotor(0, 0.5)" onmouseup="stopMotor()" ontouchstart="startMotor(0, 0.5)" ontouchend="stopMotor()">◄</button>
                     <button class="motor-btn stop" onclick="emergencyStop()">⚠</button>
-                    <button class="motor-btn" onmousedown="startMotor(0, -0.5)" onmouseup="stopMotor()" ontouchstart="startMotor(0, -0.5)" ontouchend="stopMotor()">→</button>
+                    <button class="motor-btn" onmousedown="startMotor(0, -0.5)" onmouseup="stopMotor()" ontouchstart="startMotor(0, -0.5)" ontouchend="stopMotor()">►</button>
                 </div>
             </div>
 
             <div class="panel">
-                <div class="panel-title">Lidar</div>
-                <div class="stats-grid">
+                <div class="panel-title">Лидар - Вид Сверху</div>
+                <canvas id="lidarCanvas" width="380" height="380" style="width: 100%; background: #050505;"></canvas>
+                <div class="stats-grid" style="margin-top: 8px;">
                     <div class="stat-card">
-                        <div class="stat-label">Connected</div>
+                        <div class="stat-label">Связь</div>
                         <div class="stat-value" id="lidarConnected">--</div>
                     </div>
                     <div class="stat-card">
-                        <div class="stat-label">Points</div>
+                        <div class="stat-label">Точки</div>
                         <div class="stat-value" id="lidarPoints">0</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Фронт</div>
+                        <div class="stat-value" id="lidarFrontDist">--</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Лево</div>
+                        <div class="stat-value" id="lidarLeftDist">--</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Право</div>
+                        <div class="stat-value" id="lidarRightDist">--</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Тыл</div>
+                        <div class="stat-value" id="lidarRearDist">--</div>
                     </div>
                 </div>
             </div>
 
             <div class="panel">
-                <div class="panel-title">Settings</div>
+                <div class="panel-title">Настройки</div>
                 <div class="setting-row">
-                    <label>Target</label>
-                    <select id="targetSelect" style="width: 120px;" onchange="updateSetting('target_object', this.value)">
-                        <option value="person">Person</option>
-                        <option value="bicycle">Bicycle</option>
-                        <option value="car">Car</option>
-                        <option value="motorcycle">Motorcycle</option>
-                        <option value="airplane">Airplane</option>
-                        <option value="bus">Bus</option>
-                        <option value="train">Train</option>
-                        <option value="truck">Truck</option>
-                        <option value="boat">Boat</option>
-                        <option value="traffic light">Traffic light</option>
-                        <option value="fire hydrant">Fire hydrant</option>
-                        <option value="stop sign">Stop sign</option>
-                        <option value="parking meter">Parking meter</option>
-                        <option value="bench">Bench</option>
-                        <option value="bird">Bird</option>
-                        <option value="cat">Cat</option>
-                        <option value="dog">Dog</option>
-                        <option value="horse">Horse</option>
-                        <option value="sheep">Sheep</option>
-                        <option value="cow">Cow</option>
-                        <option value="elephant">Elephant</option>
-                        <option value="bear">Bear</option>
-                        <option value="zebra">Zebra</option>
-                        <option value="giraffe">Giraffe</option>
-                        <option value="backpack">Backpack</option>
-                        <option value="umbrella">Umbrella</option>
-                        <option value="handbag">Handbag</option>
-                        <option value="tie">Tie</option>
-                        <option value="suitcase">Suitcase</option>
-                        <option value="frisbee">Frisbee</option>
-                        <option value="skis">Skis</option>
-                        <option value="snowboard">Snowboard</option>
-                        <option value="sports ball">Sports ball</option>
-                        <option value="kite">Kite</option>
-                        <option value="baseball bat">Baseball bat</option>
-                        <option value="baseball glove">Baseball glove</option>
-                        <option value="skateboard">Skateboard</option>
-                        <option value="surfboard">Surfboard</option>
-                        <option value="tennis racket">Tennis racket</option>
-                        <option value="bottle">Bottle</option>
-                        <option value="wine glass">Wine glass</option>
-                        <option value="cup">Cup</option>
-                        <option value="fork">Fork</option>
-                        <option value="knife">Knife</option>
-                        <option value="spoon">Spoon</option>
-                        <option value="bowl">Bowl</option>
-                        <option value="banana">Banana</option>
-                        <option value="apple">Apple</option>
-                        <option value="sandwich">Sandwich</option>
-                        <option value="orange">Orange</option>
-                        <option value="broccoli">Broccoli</option>
-                        <option value="carrot">Carrot</option>
-                        <option value="hot dog">Hot dog</option>
-                        <option value="pizza">Pizza</option>
-                        <option value="donut">Donut</option>
-                        <option value="cake">Cake</option>
-                        <option value="chair">Chair</option>
-                        <option value="couch">Couch</option>
-                        <option value="potted plant">Potted plant</option>
-                        <option value="bed">Bed</option>
-                        <option value="dining table">Dining table</option>
-                        <option value="toilet">Toilet</option>
-                        <option value="tv">TV</option>
-                        <option value="laptop">Laptop</option>
-                        <option value="mouse">Mouse</option>
-                        <option value="remote">Remote</option>
-                        <option value="keyboard">Keyboard</option>
-                        <option value="cell phone">Cell phone</option>
-                        <option value="microwave">Microwave</option>
-                        <option value="oven">Oven</option>
-                        <option value="toaster">Toaster</option>
-                        <option value="sink">Sink</option>
-                        <option value="refrigerator">Refrigerator</option>
-                        <option value="book">Book</option>
-                        <option value="clock">Clock</option>
-                        <option value="vase">Vase</option>
-                        <option value="scissors">Scissors</option>
-                        <option value="teddy bear">Teddy bear</option>
-                        <option value="hair drier">Hair drier</option>
-                        <option value="toothbrush">Toothbrush</option>
+                    <label>Цель</label>
+                    <select id="targetSelect" style="width: 130px;" onchange="updateSetting('target_object', this.value)">
+                        <option value="person">Человек</option>
+                        <option value="bicycle">Велосипед</option>
+                        <option value="car">Машина</option>
+                        <option value="motorcycle">Мотоцикл</option>
+                        <option value="airplane">Самолет</option>
+                        <option value="bus">Автобус</option>
+                        <option value="train">Поезд</option>
+                        <option value="truck">Грузовик</option>
+                        <option value="boat">Лодка</option>
+                        <option value="traffic light">Светофор</option>
+                        <option value="fire hydrant">Гидрант</option>
+                        <option value="stop sign">Дорожный знак</option>
+                        <option value="parking meter">Парковочный счетчик</option>
+                        <option value="bench">Скамейка</option>
+                        <option value="bird">Птица</option>
+                        <option value="cat">Кошка</option>
+                        <option value="dog">Собака</option>
+                        <option value="horse">Лошадь</option>
+                        <option value="sheep">Овца</option>
+                        <option value="cow">Корова</option>
+                        <option value="elephant">Слон</option>
+                        <option value="bear">Медведь</option>
+                        <option value="zebra">Зебра</option>
+                        <option value="giraffe">Жираф</option>
+                        <option value="backpack">Рюкзак</option>
+                        <option value="umbrella">Зонт</option>
+                        <option value="handbag">Сумка</option>
+                        <option value="tie">Галстук</option>
+                        <option value="suitcase">Чемодан</option>
+                        <option value="frisbee">Фрисби</option>
+                        <option value="skis">Лыжи</option>
+                        <option value="snowboard">Сноуборд</option>
+                        <option value="sports ball">Мяч</option>
+                        <option value="kite">Воздушный змей</option>
+                        <option value="baseball bat">Бейсбольная бита</option>
+                        <option value="baseball glove">Бейсбольная перчатка</option>
+                        <option value="skateboard">Скейтборд</option>
+                        <option value="surfboard">Серф</option>
+                        <option value="tennis racket">Теннисная ракетка</option>
+                        <option value="bottle">Бутылка</option>
+                        <option value="wine glass">Бокал</option>
+                        <option value="cup">Кружка</option>
+                        <option value="fork">Вилка</option>
+                        <option value="knife">Нож</option>
+                        <option value="spoon">Ложка</option>
+                        <option value="bowl">Миска</option>
+                        <option value="banana">Банан</option>
+                        <option value="apple">Яблоко</option>
+                        <option value="sandwich">Сэндвич</option>
+                        <option value="orange">Апельсин</option>
+                        <option value="broccoli">Брокколи</option>
+                        <option value="carrot">Морковь</option>
+                        <option value="hot dog">Хот-дог</option>
+                        <option value="pizza">Пицца</option>
+                        <option value="donut">Пончик</option>
+                        <option value="cake">Торт</option>
+                        <option value="chair">Стул</option>
+                        <option value="couch">Диван</option>
+                        <option value="potted plant">Растение</option>
+                        <option value="bed">Кровать</option>
+                        <option value="dining table">Стол</option>
+                        <option value="toilet">Туалет</option>
+                        <option value="tv">Телевизор</option>
+                        <option value="laptop">Ноутбук</option>
+                        <option value="mouse">Мышь</option>
+                        <option value="remote">Пульт</option>
+                        <option value="keyboard">Клавиатура</option>
+                        <option value="cell phone">Телефон</option>
+                        <option value="microwave">Микроволновка</option>
+                        <option value="oven">Духовка</option>
+                        <option value="toaster">Тостер</option>
+                        <option value="sink">Раковина</option>
+                        <option value="refrigerator">Холодильник</option>
+                        <option value="book">Книга</option>
+                        <option value="clock">Часы</option>
+                        <option value="vase">Ваза</option>
+                        <option value="scissors">Ножницы</option>
+                        <option value="teddy bear">Плюшевый мишка</option>
+                        <option value="hair drier">Фен</option>
+                        <option value="toothbrush">Зубная щетка</option>
                     </select>
                 </div>
                 <div class="setting-row">
-                    <label>Confidence</label>
+                    <label>Порог</label>
                     <input type="range" id="confSlider" min="0.1" max="0.9" step="0.05" value="0.45" style="width: 80px;" onchange="updateConfidence(this.value)">
                 </div>
                 <div class="setting-row">
-                    <label>Tracking</label>
+                    <label>Трекинг</label>
                     <label class="toggle-switch">
                         <input type="checkbox" id="trackingToggle" checked onchange="toggleSetting('enable_tracking', this.checked)">
                         <span class="toggle-slider"></span>
                     </label>
                 </div>
                 <div class="setting-row">
-                    <label>Safe Distance</label>
+                    <label>Безоп. Дист.</label>
                     <input type="range" id="safeDistSlider" min="0.1" max="1.0" step="0.1" value="0.3" style="width: 80px;" onchange="updateObstacleParam('min_distance', this.value)">
                 </div>
             </div>
 
             <div class="panel logs-panel" id="logsPanel">
-                <div class="panel-title">Logs</div>
+                <div class="panel-title">Логи</div>
                 <div id="logsList"></div>
+            </div>
+
+            <div class="panel">
+                <div class="panel-title">Обнаруженные Объекты</div>
+                <div class="objects-list" id="objectsList">
+                    <div style="font-size: 11px; color: #00aa30; text-align: center; padding: 10px;">Нет данных</div>
+                </div>
             </div>
         </div>
     </div>
@@ -972,20 +1068,20 @@ class WebInterfaceNode(Node):
     <script>
         let ws = null;
         let reconnectAttempts = 0;
-        
+
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             ws = new WebSocket(protocol + '//' + window.location.host + '/ws');
 
             ws.onopen = function() {
                 document.getElementById('wsStatus').className = 'status-dot connected';
-                document.getElementById('wsStatusText').textContent = 'Connected';
+                document.getElementById('wsStatusText').textContent = 'ПОДКЛЮЧЕНО';
                 reconnectAttempts = 0;
             };
 
             ws.onclose = function() {
                 document.getElementById('wsStatus').className = 'status-dot disconnected';
-                document.getElementById('wsStatusText').textContent = 'Disconnected';
+                document.getElementById('wsStatusText').textContent = 'ОТКЛЮЧЕНО';
                 reconnectAttempts++;
                 setTimeout(connectWebSocket, Math.min(reconnectAttempts * 1000, 5000));
             };
@@ -1003,18 +1099,25 @@ class WebInterfaceNode(Node):
         }
 
         function updateUI(state) {
+            window._lastState = state;
             const det = state.detection || {};
             document.getElementById('targetDisplay').textContent = det.target || '-';
-            
+
             const foundEl = document.getElementById('foundDisplay');
-            foundEl.textContent = det.found ? 'YES' : 'NO';
+            foundEl.textContent = det.found ? 'ДА' : 'НЕТ';
             foundEl.className = 'stat-value ' + (det.found ? 'success' : 'danger');
-            
+
             document.getElementById('zoneDisplay').textContent = det.zone || '-';
             document.getElementById('fpsDisplay').textContent = (det.fps || 0).toFixed(1);
             document.getElementById('latencyDisplay').textContent = (det.inference_time_ms || 0).toFixed(1) + 'ms';
             document.getElementById('detectionsDisplay').textContent = det.detections_count || 0;
             document.getElementById('trackedDisplay').textContent = det.tracked_count || 0;
+
+            // Update detected objects list
+            updateObjectsList(det.objects || [], det.target || '-');
+
+            // Draw bounding boxes on overlay
+            drawDetectionBoxes(det.objects || []);
 
             const sys = state.system || {};
             document.getElementById('uptimeDisplay').textContent = formatUptime(sys.uptime_seconds || 0);
@@ -1022,49 +1125,59 @@ class WebInterfaceNode(Node):
             document.getElementById('memDisplay').textContent = (sys.memory_usage_mb || 0) + 'MB';
 
             const motor = state.motor || {};
-            const motorStatus = document.getElementById('motorStatus');
-            motorStatus.textContent = motor.enabled ? 'ON' : 'OFF';
-            motorStatus.className = 'stat-value ' + (motor.enabled ? 'success' : 'danger');
+            const motorStatusEl = document.getElementById('motorStatus');
+            motorStatusEl.textContent = motor.enabled ? 'ВКЛ' : 'ВЫКЛ';
+            motorStatusEl.className = 'stat-value ' + (motor.enabled ? 'success' : 'danger');
             document.getElementById('motorSpeed').textContent = motor.speed || 0;
 
             const obstacle = state.obstacle_avoidance || {};
             const obsPanel = document.getElementById('obstaclePanel');
             const obsIcon = document.getElementById('obstacleIcon');
             const obsText = document.getElementById('obstacleText');
-            
+
             obsPanel.className = 'panel obstacle-status';
             if (obstacle.obstacle_detected) {
                 obsPanel.classList.add('blocked');
-                obsIcon.textContent = '⚠';
-                obsText.textContent = 'BLOCKED';
+                obsIcon.textContent = '[!!]';
+                obsIcon.style.color = '#ff0040';
+                obsText.textContent = 'БЛОКИРОВКА';
+                obsText.style.color = '#ff0040';
             } else if (obstacle.min_distance_m < obstacle.slow_down_distance) {
                 obsPanel.classList.add('warning');
-                obsIcon.textContent = '⚡';
-                obsText.textContent = 'SLOW';
+                obsIcon.textContent = '[!]';
+                obsIcon.style.color = '#ffaa00';
+                obsText.textContent = 'ЗАМЕДЛЕНИЕ';
+                obsText.style.color = '#ffaa00';
             } else {
                 obsPanel.classList.add('clear');
-                obsIcon.textContent = '✓';
-                obsText.textContent = 'CLEAR';
+                obsIcon.textContent = '[OK]';
+                obsIcon.style.color = '#00ff41';
+                obsText.textContent = 'ПРОХОД ЯСЕН';
+                obsText.style.color = '#00ff41';
             }
-            
-            document.getElementById('obstacleDistance').textContent = 
+
+            document.getElementById('obstacleDistance').textContent =
                 obstacle.min_distance_m < 10 ? obstacle.min_distance_m.toFixed(2) : '--';
             document.getElementById('obstacleToggle').checked = obstacle.enabled;
 
             const lidar = state.lidar || {};
             const lidarConn = document.getElementById('lidarConnected');
-            lidarConn.textContent = lidar.connected ? 'YES' : 'NO';
+            lidarConn.textContent = lidar.connected ? 'ЕСТЬ' : 'НЕТ';
             lidarConn.className = 'stat-value ' + (lidar.connected ? 'success' : 'danger');
             document.getElementById('lidarPoints').textContent = lidar.points || 0;
 
+            // Render lidar map
+            const lidarCanvas = document.getElementById('lidarCanvas');
+            if (lidarCanvas && lidar.scan_data) {
+                renderLidarMap(lidarCanvas, lidar.scan_data);
+            }
+
             if (state.logs && state.logs.length > 0) {
                 const logsList = document.getElementById('logsList');
-                logsList.innerHTML = state.logs.slice(-10).map(log => 
+                logsList.innerHTML = state.logs.slice(-10).map(log =>
                     `<div class="log-item ${log.level}">[${new Date(log.timestamp).toLocaleTimeString()}] ${log.message}</div>`
                 ).join('');
             }
-
-            // alerts disabled
         }
 
         function updateSettingsUI(settings) {
@@ -1075,14 +1188,315 @@ class WebInterfaceNode(Node):
             document.getElementById('safeDistSlider').value = settings.min_safe_distance || 0.3;
         }
 
+        function renderLidarMap(canvas, scanData) {
+            const ctx = canvas.getContext('2d');
+            const width = canvas.width;
+            const height = canvas.height;
+            const cx = width / 2;
+            const cy = height / 2;
+            const maxRange = scanData.range_max || 5.0;
+            const angleOffsetDeg = scanData.angle_offset_deg || 0;
+            // Show only up to 3m for better detail, stretch scale
+            const displayMaxRange = Math.min(maxRange, 3.0);
+            const padding = 35;
+            const scale = (Math.min(width, height) / 2 - padding) / displayMaxRange;
+
+            const obstacle = (window._lastState && window._lastState.obstacle_avoidance) || {};
+            const isBlocked = obstacle.obstacle_detected || false;
+            const minDist = obstacle.min_distance_m || 999.0;
+            const slowDist = obstacle.slow_down_distance || 0.5;
+
+            // Border color based on obstacle status
+            if (isBlocked) {
+                canvas.style.borderColor = '#ff0040';
+                canvas.style.boxShadow = '0 0 15px rgba(255, 0, 64, 0.4)';
+            } else if (minDist < slowDist) {
+                canvas.style.borderColor = '#ffaa00';
+                canvas.style.boxShadow = '0 0 15px rgba(255, 170, 0, 0.4)';
+            } else {
+                canvas.style.borderColor = '#00ff41';
+                canvas.style.boxShadow = '0 0 10px rgba(0, 255, 65, 0.2)';
+            }
+
+            // Background
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, width, height);
+
+            // Grid circles with distance labels
+            const gridSteps = 5;
+            ctx.lineWidth = 1;
+            ctx.font = '9px Courier New';
+            ctx.textAlign = 'left';
+            for (let i = 1; i <= gridSteps; i++) {
+                const radius = (i * displayMaxRange / gridSteps) * scale;
+                ctx.strokeStyle = `rgba(0, 255, 65, ${0.1 + i * 0.03})`;
+                ctx.beginPath();
+                ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.fillStyle = 'rgba(0, 255, 65, 0.5)';
+                ctx.fillText((i * displayMaxRange / gridSteps).toFixed(1) + 'м', cx + radius + 2, cy + 3);
+            }
+
+            // Cross lines (axes)
+            ctx.strokeStyle = 'rgba(0, 255, 65, 0.2)';
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(cx, 0); ctx.lineTo(cx, height);
+            ctx.moveTo(0, cy); ctx.lineTo(width, cy);
+            ctx.stroke();
+            ctx.setLineDash([]);
+
+            // Zone sector lines (with offset applied)
+            // Display: top=front, right=right, left=left, bottom=rear
+            const sectors = [
+                { angle: 90, label: 'ФРОНТ', color: 'rgba(0, 255, 65, 0.3)' },
+                { angle: -90, label: 'ТЫЛ', color: 'rgba(255, 170, 0, 0.25)' },
+                { angle: 180, label: 'ЛЕВО', color: 'rgba(0, 200, 50, 0.25)' },
+                { angle: 0, label: 'ПРАВО', color: 'rgba(0, 200, 50, 0.25)' },
+            ];
+
+            sectors.forEach(s => {
+                const rad = s.angle * Math.PI / 180;
+                ctx.strokeStyle = s.color;
+                ctx.lineWidth = 1;
+                ctx.setLineDash([3, 3]);
+                ctx.beginPath();
+                ctx.moveTo(cx, cy);
+                ctx.lineTo(cx + Math.cos(rad) * Math.max(width, height), cy + Math.sin(rad) * Math.max(width, height));
+                ctx.stroke();
+            });
+            ctx.setLineDash([]);
+
+            // Direction labels (rectangular boxes)
+            const drawLabel = (text, x, y, color) => {
+                ctx.font = 'bold 10px Courier New';
+                const tw = ctx.measureText(text).width;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(x - tw/2 - 3, y - 7, tw + 6, 14);
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x - tw/2 - 3, y - 7, tw + 6, 14);
+                ctx.fillStyle = color;
+                ctx.textAlign = 'center';
+                ctx.fillText(text, x, y + 3);
+            };
+
+            drawLabel('▲ ФРОНТ', cx, height - 8, '#00ff41');
+            drawLabel('▼ ТЫЛ', cx, 15, '#ffaa00');
+            drawLabel('◄ ЛЕВО', 55, cy + 3, '#00c832');
+            drawLabel('ПРАВО ►', width - 55, cy + 3, '#00c832');
+
+            // Parse scan data
+            const ranges = scanData.ranges || [];
+            const angleMin = scanData.angle_min || 0;
+            const angleInc = scanData.angle_increment || 0.017;
+
+            // Build points - apply angle offset to rotate map so front is at top
+            const points = [];
+            for (let i = 0; i < ranges.length; i++) {
+                const r = ranges[i];
+                if (r === null || r === undefined || r <= 0) continue;
+                const rawAngle = angleMin + i * angleInc;
+                // Apply offset: shift angle so display front aligns with top of canvas
+                const adjustedAngle = rawAngle + (angleOffsetDeg * Math.PI / 180);
+                const dist = Math.min(r, displayMaxRange);
+                // Skip points beyond display range
+                if (r > displayMaxRange) continue;
+                const x = cx + Math.cos(adjustedAngle) * dist * scale;
+                const y = cy + Math.sin(adjustedAngle) * dist * scale;
+                points.push({x, y, dist, raw: r});
+            }
+
+            if (points.length === 0) {
+                ctx.fillStyle = '#ff0040';
+                ctx.font = '12px Courier New';
+                ctx.textAlign = 'center';
+                ctx.fillText('НЕТ ДАННЫХ ЛИДАРА', cx, cy);
+                return;
+            }
+
+            // Draw filled polygon for obstacle shape
+            if (points.length > 2) {
+                // Outer glow
+                ctx.strokeStyle = 'rgba(0, 255, 65, 0.2)';
+                ctx.lineWidth = 5;
+                ctx.beginPath();
+                ctx.moveTo(points[0].x, points[0].y);
+                for (let i = 1; i < points.length; i++) {
+                    ctx.lineTo(points[i].x, points[i].y);
+                }
+                ctx.closePath();
+                ctx.stroke();
+
+                // Gradient fill
+                const gradient = ctx.createRadialGradient(cx, cy, 0, cx, cy, displayMaxRange * scale);
+                gradient.addColorStop(0, 'rgba(0, 255, 65, 0.35)');
+                gradient.addColorStop(0.6, 'rgba(0, 200, 50, 0.2)');
+                gradient.addColorStop(1, 'rgba(0, 100, 25, 0.1)');
+                ctx.fillStyle = gradient;
+                ctx.beginPath();
+                ctx.moveTo(points[0].x, points[0].y);
+                for (let i = 1; i < points.length; i++) {
+                    ctx.lineTo(points[i].x, points[i].y);
+                }
+                ctx.closePath();
+                ctx.fill();
+
+                // Main outline
+                ctx.strokeStyle = '#00ff41';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(points[0].x, points[0].y);
+                for (let i = 1; i < points.length; i++) {
+                    ctx.lineTo(points[i].x, points[i].y);
+                }
+                ctx.closePath();
+                ctx.stroke();
+            }
+
+            // Draw individual points colored by distance (sparser for performance)
+            const step = Math.max(1, Math.floor(points.length / 300)); // Max 300 dots
+            for (let idx = 0; idx < points.length; idx += step) {
+                const p = points[idx];
+                const intensity = 1 - (p.dist / displayMaxRange);
+                const green = Math.floor(180 + intensity * 75);
+                const alpha = 0.4 + intensity * 0.6;
+                const size = 1.5 + intensity * 2;
+                ctx.fillStyle = `rgba(0, ${green}, 40, ${alpha})`;
+                ctx.fillRect(p.x - size/2, p.y - size/2, size, size); // Square dots for hacker style
+            }
+
+            // Zone distance arcs
+            const frontDist = obstacle.front_distance || obstacle.min_distance_m || 999.0;
+            const leftDist = obstacle.left_distance || 999.0;
+            const rightDist = obstacle.right_distance || 999.0;
+            const rearDist = obstacle.rear_distance || 999.0;
+
+            // Update stat cards
+            const setDist = (id, dist) => {
+                const el = document.getElementById(id);
+                if (el) el.textContent = dist < 10 ? dist.toFixed(2) + 'м' : '--';
+            };
+            setDist('lidarFrontDist', frontDist);
+            setDist('lidarLeftDist', leftDist);
+            setDist('lidarRightDist', rightDist);
+            setDist('lidarRearDist', rearDist);
+
+            // Draw distance arcs on canvas
+            const drawArc = (angle, dist, color) => {
+                if (dist >= 10) return;
+                const rad = angle * Math.PI / 180;
+                const r = dist * scale;
+                ctx.strokeStyle = color;
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(cx, cy, r, rad - 0.25, rad + 0.25);
+                ctx.stroke();
+            };
+
+            drawArc(90, frontDist, '#00ff41');
+            drawArc(-90, rearDist, '#ffaa00');
+            drawArc(180, leftDist, '#00c832');
+            drawArc(0, rightDist, '#00c832');
+
+            // Center robot indicator - square for hacker style
+            ctx.fillStyle = '#ff0040';
+            ctx.fillRect(cx - 6, cy - 6, 12, 12);
+            ctx.fillStyle = '#000';
+            ctx.fillRect(cx - 3, cy - 3, 6, 6);
+            ctx.fillStyle = '#00ff41';
+            ctx.fillRect(cx - 1, cy - 1, 2, 2);
+
+            // Front direction arrow
+            ctx.fillStyle = '#00ff41';
+            ctx.beginPath();
+            ctx.moveTo(cx, cy - 18);
+            ctx.lineTo(cx - 5, cy - 11);
+            ctx.lineTo(cx + 5, cy - 11);
+            ctx.closePath();
+            ctx.fill();
+        }
+
+        function updateObjectsList(objects, currentTarget) {
+            const listEl = document.getElementById('objectsList');
+            if (!objects || objects.length === 0) {
+                listEl.innerHTML = '<div style="font-size: 11px; color: #00aa30; text-align: center; padding: 10px;">Нет объектов</div>';
+                return;
+            }
+            listEl.innerHTML = objects.map((obj, idx) => {
+                const isActive = obj.class === currentTarget;
+                return `<div class="object-item ${isActive ? 'active' : ''}" onclick="setTargetFromObject('${obj.class}')">
+                    <span class="object-name">${obj.class}</span>
+                    <span class="object-conf">${(obj.confidence * 100).toFixed(0)}%</span>
+                </div>`;
+            }).join('');
+        }
+
+        function setTargetFromObject(className) {
+            document.getElementById('targetSelect').value = className;
+            updateSetting('target_object', className);
+        }
+
+        function drawDetectionBoxes(objects) {
+            const canvas = document.getElementById('videoOverlay');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            if (!objects || objects.length === 0) return;
+
+            const currentTarget = (window._lastState && window._lastState.detection && window._lastState.detection.target) || '-';
+
+            objects.forEach(obj => {
+                const isTarget = obj.class === currentTarget;
+                const color = isTarget ? '#00ff41' : '#00aa30';
+                const lineWidth = isTarget ? 3 : 1;
+
+                ctx.strokeStyle = color;
+                ctx.lineWidth = lineWidth;
+                ctx.strokeRect(obj.x, obj.y, obj.w, obj.h);
+
+                // Label background
+                ctx.font = '11px Courier New';
+                const labelText = `${obj.class} ${(obj.confidence * 100).toFixed(0)}%`;
+                const textWidth = ctx.measureText(labelText).width;
+                ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+                ctx.fillRect(obj.x, obj.y - 16, textWidth + 8, 16);
+
+                // Label text
+                ctx.fillStyle = color;
+                ctx.fillText(labelText, obj.x + 4, obj.y - 4);
+            });
+        }
+
+        // Click handling on video overlay
+        document.addEventListener('DOMContentLoaded', function() {
+            const overlay = document.getElementById('videoOverlay');
+            overlay.addEventListener('click', function(e) {
+                const rect = overlay.getBoundingClientRect();
+                const scaleX = overlay.width / rect.width;
+                const scaleY = overlay.height / rect.height;
+                const clickX = (e.clientX - rect.left) * scaleX;
+                const clickY = (e.clientY - rect.top) * scaleY;
+
+                const objects = (window._lastState && window._lastState.detection && window._lastState.detection.objects) || [];
+
+                // Find object that was clicked
+                for (const obj of objects) {
+                    if (clickX >= obj.x && clickX <= obj.x + obj.w &&
+                        clickY >= obj.y && clickY <= obj.y + obj.h) {
+                        setTargetFromObject(obj.class);
+                        return;
+                    }
+                }
+            });
+        });
+
         function formatUptime(seconds) {
             const h = Math.floor(seconds / 3600);
             const m = Math.floor((seconds % 3600) / 60);
             const s = seconds % 60;
             return `${h}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
         }
-
-        function showAlert(message) { /* alerts disabled */ }
 
         function updateSetting(key, value) {
             fetch('/api/settings', {
@@ -1131,9 +1545,8 @@ class WebInterfaceNode(Node):
         }
 
         function startMotor(linear, angular) {
-            stopMotor(); // avoid multiple timers
+            stopMotor();
             sendMotorOnce(linear, angular);
-            // Keep-alive for Arduino-side CMD_TIMEOUT
             motorInterval = setInterval(() => {
                 sendMotorOnce(lastMotorCmd.linear, lastMotorCmd.angular);
             }, 100);
@@ -1147,7 +1560,6 @@ class WebInterfaceNode(Node):
             sendMotorOnce(0, 0);
         }
 
-        // Backward compatible
         function sendMotor(linear, angular) { startMotor(linear, angular); }
         function sendStop() { stopMotor(); }
 

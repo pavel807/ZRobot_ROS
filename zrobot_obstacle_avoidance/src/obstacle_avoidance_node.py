@@ -28,6 +28,7 @@ class ObstacleAvoidanceNode(Node):
         self.declare_parameter('front_offset', 0.205)
         self.declare_parameter('scan_timeout_sec', 1.0)
         self.declare_parameter('search_delay_sec', 2.0)  # Задержка перед началом поиска
+        self.declare_parameter('angle_offset_deg', 0.0)  # Смещение: 0=0°лидара(провод)=право робота, фронт=270°лидара
 
         self.enabled = bool(self.get_parameter('enabled').value)
         self.min_safe_distance = self.get_parameter('min_safe_distance').value
@@ -38,6 +39,7 @@ class ObstacleAvoidanceNode(Node):
         self.front_offset = self.get_parameter('front_offset').value
         self.scan_timeout_sec = float(self.get_parameter('scan_timeout_sec').value)
         self.search_delay_sec = float(self.get_parameter('search_delay_sec').value)
+        self.angle_offset_deg = float(self.get_parameter('angle_offset_deg').value)
 
         self.cmd_vel_sub = self.create_subscription(
             Twist,
@@ -78,6 +80,7 @@ class ObstacleAvoidanceNode(Node):
         self.obstacle_pub = self.create_publisher(Bool, 'obstacle_detected', 10)
         self.status_pub = self.create_publisher(String, 'obstacle_status', 10)
         self.lidar_pub = self.create_publisher(String, 'lidar_status', 10)
+        self.lidar_scan_pub = self.create_publisher(String, 'lidar_scan', 10)
 
         self.current_cmd = Twist()
         self.target_in_view = False
@@ -211,6 +214,12 @@ class ObstacleAvoidanceNode(Node):
         half_front = max(1.0, self.scan_angle_range / 2.0)
         half_side = max(5.0, min(90.0, self.scan_angle_range))
 
+        # Zone centers: 0°=право, 90°=фронт, 180°=лево, 270°=тыл
+        front_center = (90.0 + self.angle_offset_deg) % 360
+        right_center = (0.0 + self.angle_offset_deg) % 360
+        left_center = (180.0 + self.angle_offset_deg) % 360
+        rear_center = (270.0 + self.angle_offset_deg) % 360
+
         for i, r in enumerate(ranges):
             if math.isinf(r) or math.isnan(r) or r <= 0.0:
                 continue
@@ -226,13 +235,13 @@ class ObstacleAvoidanceNode(Node):
             # Convert from lidar measurement to approximate distance from robot front
             dist = max(0.0, float(r) - float(self.front_offset))
 
-            if self._within_sector(deg, center_deg=0.0, half_width_deg=half_front):
+            if self._within_sector(deg, center_deg=front_center, half_width_deg=half_front):
                 front_ranges.append(dist)
-            if self._within_sector(deg, center_deg=180.0, half_width_deg=half_front):
+            if self._within_sector(deg, center_deg=rear_center, half_width_deg=half_front):
                 rear_ranges.append(dist)
-            if self._within_sector(deg, center_deg=90.0, half_width_deg=half_side):
+            if self._within_sector(deg, center_deg=left_center, half_width_deg=half_side):
                 left_ranges.append(dist)
-            if self._within_sector(deg, center_deg=270.0, half_width_deg=half_side):
+            if self._within_sector(deg, center_deg=right_center, half_width_deg=half_side):
                 right_ranges.append(dist)
 
         min_front = min(front_ranges) if front_ranges else float('inf')
@@ -351,6 +360,7 @@ class ObstacleAvoidanceNode(Node):
         self.min_lidar_distance = min_front if min_front != float('inf') else 999.0
 
         self._publish_lidar_status(msg, min_front, min_rear, min_left, min_right)
+        self._publish_lidar_scan(msg)
 
     def _publish_obstacle_status(self, min_front, min_rear, min_left, min_right):
         import json
@@ -383,6 +393,21 @@ class ObstacleAvoidanceNode(Node):
         }
         lidar_msg.data = json.dumps(lidar_data)
         self.lidar_pub.publish(lidar_msg)
+
+    def _publish_lidar_scan(self, scan_msg: LaserScan):
+        import json
+        scan_data = {
+            'angle_min': float(scan_msg.angle_min),
+            'angle_max': float(scan_msg.angle_max),
+            'angle_increment': float(scan_msg.angle_increment),
+            'range_min': float(getattr(scan_msg, 'range_min', 0.0) or 0.0),
+            'range_max': float(getattr(scan_msg, 'range_max', 0.0) or 0.0),
+            'angle_offset_deg': float(self.angle_offset_deg),
+            'ranges': [float(r) if not math.isinf(r) and not math.isnan(r) and r > 0 else None for r in scan_msg.ranges]
+        }
+        msg = String()
+        msg.data = json.dumps(scan_data)
+        self.lidar_scan_pub.publish(msg)
 
 
 def main(args=None):
