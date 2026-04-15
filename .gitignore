@@ -5,24 +5,11 @@ __pycache__/
 *.pyo
 *.pyd
 
-# ROS/Robotics
-zrobot_perception/build/
-zrobot_perception/devel/
-zrobot_perception/install/
-zrobot_perception/log/
+# Logs and temp files
+*.log
+*.tmp
 
-# Compiled objects
-*.o
-*.obj
-*.so
-*.a
-*.lib
-*.dll
-*.exe
-
-# Dependencies
-venv/
-.venv/
+# Environment
 .env
 .env.local
 *.env.*
@@ -30,25 +17,14 @@ venv/
 # Editors
 .vscode/
 .idea/
-*.swp
-*.swo
 
-# Logs
-*.log
+# Dependencies
+.venv/
+venv/
+node_modules/
 
-# Temp files
-*.tmp
-.DS_Store
-Thumbs.db
-
-# Coverage
-coverage/
-htmlcov/
-.coverage
-
-# MyPy
-.mypy_cache/
-
-# PyTest
-.pytest_cache/
+# Build artifacts
+dist/
+build/
+target/
 ```
