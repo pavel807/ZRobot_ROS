@@ -2,11 +2,12 @@
 # -*- coding: utf-8 -*-
 """
 Advanced YOLO Detector Node — multiprocessing NPU inference (RK3588).
-СТАБИЛЬНАЯ ВЕРСИЯ:
-  ✅ Надёжный shutdown через mp.Event + таймауты очередей
-  ✅ Обработка переполнения очередей без блокировок
-  ✅ Корректное масштабирование координат 640×640 → 640×480
-  ✅ Безопасная передача данных (только Python-типы)
+СТАБИЛЬНАЯ ВЕРСИЯ С МАГНИТНЫМ ПРЕСЛЕДОВАНИЕМ:
+  ✅ Фильтр Калмана для сглаживания позиции
+  ✅ "Память" цели — удержание объекта при кратковременных потерях
+  ✅ Блокировка по классу — фокус на одном типе объекта
+  ✅ Приоритет по площади — выбор крупнейшего объекта
+  ✅ Таймер потери — объект теряется только после N кадров без детекции
 """
 
 import rclpy
@@ -156,6 +157,10 @@ class YoloDetectorNode(Node):
         self.declare_parameter('enable_auto_follow', True)
         self.declare_parameter('max_linear_speed', 0.3)
         self.declare_parameter('turn_speed', 0.5)
+        self.declare_parameter('kalman_process_noise', 0.1)
+        self.declare_parameter('kalman_measurement_noise', 0.5)
+        self.declare_parameter('lost_timeout_frames', 15)
+        self.declare_parameter('min_target_area', 1000)
 
         self.model_path = self.get_parameter('model_path').value
         self.camera_id = self.get_parameter('camera_id').value
@@ -165,6 +170,10 @@ class YoloDetectorNode(Node):
         self.enable_auto_follow = self.get_parameter('enable_auto_follow').value
         self.max_linear_speed = self.get_parameter('max_linear_speed').value
         self.turn_speed = self.get_parameter('turn_speed').value
+        self.kalman_process_noise = self.get_parameter('kalman_process_noise').value
+        self.kalman_measurement_noise = self.get_parameter('kalman_measurement_noise').value
+        self.lost_timeout_frames = self.get_parameter('lost_timeout_frames').value
+        self.min_target_area = self.get_parameter('min_target_area').value
 
         self.get_logger().info(f'📦 COCO Classes: {len(COCO_CLASSES)} objects')
 
@@ -242,6 +251,17 @@ class YoloDetectorNode(Node):
 
         self.get_logger().info('✅ Advanced YOLO Detector node STARTED')
 
+        # === МАГНИТНОЕ ПРЕСЛЕДОВАНИЕ ===
+        # Фильтр Калмана для позиции цели [x, y, w, h, vx, vy, vw, vh]
+        self.kalman = None
+        self.kalman_initialized = False
+        
+        # Состояние цели
+        self.tracked_target = None  # {class_id, area, center_x, center_y, w, h}
+        self.frames_since_last_detection = 0
+        self.target_lost = False
+        self.locked_class_id = None  # Блокировка по классу после первого обнаружения
+
     def _collect_results(self):
         """Collector thread с неблокирующим get() и проверкой shutdown."""
         while self.collector_running and rclpy.ok():
@@ -263,11 +283,183 @@ class YoloDetectorNode(Node):
 
     def target_callback(self, msg: String):
         self.target_object = msg.data
+        # Сброс блокировки при смене цели
+        self.locked_class_id = None
+        self.tracked_target = None
+        self.kalman_initialized = False
+        self.frames_since_last_detection = 0
+        self.target_lost = False
         self.get_logger().info(f'🎯 Target changed to: {msg.data}')
 
     def confidence_callback(self, msg: Float32):
         self.obj_thresh = msg.data
         self.get_logger().info(f'📊 Confidence threshold: {msg.data:.2f}')
+
+    def _init_kalman(self, x, y, w, h):
+        """Инициализация фильтра Калмана для отслеживания позиции."""
+        # Состояние: [x, y, w, h, vx, vy, vw, vh]
+        self.kalman = cv2.KalmanFilter(8, 4)
+        
+        # Матрица перехода состояния (постоянная скорость)
+        dt = 0.033  # 30 FPS
+        self.kalman.transitionMatrix = np.array([
+            [1, 0, 0, 0, dt, 0,  0,  0],
+            [0, 1, 0, 0, 0,  dt, 0,  0],
+            [0, 0, 1, 0, 0,  0,  dt, 0],
+            [0, 0, 0, 1, 0,  0,  0,  dt],
+            [0, 0, 0, 0, 1,  0,  0,  0],
+            [0, 0, 0, 0, 0,  1,  0,  0],
+            [0, 0, 0, 0, 0,  0,  1,  0],
+            [0, 0, 0, 0, 0,  0,  0,  1]
+        ], dtype=np.float32)
+        
+        # Матрица измерения
+        self.kalman.measurementMatrix = np.array([
+            [1, 0, 0, 0, 0, 0, 0, 0],
+            [0, 1, 0, 0, 0, 0, 0, 0],
+            [0, 0, 1, 0, 0, 0, 0, 0],
+            [0, 0, 0, 1, 0, 0, 0, 0]
+        ], dtype=np.float32)
+        
+        # Шумы
+        self.kalman.processNoiseCov = np.eye(8, dtype=np.float32) * self.kalman_process_noise
+        self.kalman.measurementNoiseCov = np.eye(4, dtype=np.float32) * self.kalman_measurement_noise
+        
+        # Инициализация состояния
+        self.kalman.statePre = np.array([[x], [y], [w], [h], [0], [0], [0], [0]], dtype=np.float32)
+        self.kalman_initialized = True
+
+    def _update_kalman(self, x, y, w, h):
+        """Обновление фильтра Калмана с новым измерением."""
+        if not self.kalman_initialized:
+            self._init_kalman(x, y, w, h)
+            return self.kalman.statePre[:4].flatten()
+        
+        # Предсказание
+        predicted = self.kalman.predict()
+        
+        # Коррекция
+        measurement = np.array([[x], [y], [w], [h]], dtype=np.float32)
+        corrected = self.kalman.correct(measurement)
+        
+        return corrected[:4].flatten()
+
+    def _predict_kalman(self):
+        """Предсказание позиции без измерения (при потере цели)."""
+        if not self.kalman_initialized or self.kalman is None:
+            return None
+        
+        predicted = self.kalman.predict()
+        return predicted[:4].flatten()
+
+    def _select_target(self, detections):
+        """
+        Выбор цели для преследования с приоритетами:
+        1. Если есть locked_class_id — ищем только этот класс
+        2. Среди подходящих — выбираем объект с наибольшей площадью
+        3. Если цель потеряна — используем предсказание Калмана
+        """
+        if not detections:
+            return None
+        
+        candidates = []
+        
+        for (x1, y1, w, h, score, cls_id) in detections:
+            class_name = COCO_CLASSES.get(cls_id, '')
+            
+            # Проверка на соответствие целевому классу
+            if class_name != self.target_object:
+                continue
+            
+            # Блокировка по классу
+            if self.locked_class_id is not None and cls_id != self.locked_class_id:
+                continue
+            
+            # Минимальная площадь
+            area = w * h
+            if area < self.min_target_area:
+                continue
+            
+            center_x = x1 + w / 2
+            center_y = y1 + h / 2
+            
+            candidates.append({
+                'x1': x1, 'y1': y1, 'w': w, 'h': h,
+                'area': area, 'center_x': center_x, 'center_y': center_y,
+                'score': score, 'cls_id': cls_id
+            })
+        
+        if not candidates:
+            return None
+        
+        # Выбираем объект с наибольшей площадью
+        best = max(candidates, key=lambda c: c['area'])
+        
+        # Блокируем класс после первого выбора
+        if self.locked_class_id is None:
+            self.locked_class_id = best['cls_id']
+            self.get_logger().info(f'🔒 Locked on class: {COCO_CLASSES.get(best["cls_id"], best["cls_id"])} (ID: {best["cls_id"]})')
+        
+        return best
+
+    def _update_tracking(self, selected_target):
+        """
+        Обновление состояния трекинга:
+        - Если цель найдена — обновляем фильтр Калмана
+        - Если цель потеряна — используем предсказание и счётчик кадров
+        """
+        if selected_target:
+            self.frames_since_last_detection = 0
+            self.target_lost = False
+            
+            # Обновляем фильтр Калмана
+            predicted_pos = self._update_kalman(
+                selected_target['center_x'],
+                selected_target['center_y'],
+                selected_target['w'],
+                selected_target['h']
+            )
+            
+            self.tracked_target = {
+                'center_x': predicted_pos[0],
+                'center_y': predicted_pos[1],
+                'w': predicted_pos[2],
+                'h': predicted_pos[3],
+                'area': selected_target['area'],
+                'cls_id': selected_target['cls_id'],
+                'from_detection': True
+            }
+        else:
+            self.frames_since_last_detection += 1
+            
+            # Проверка на окончательную потерю
+            if self.frames_since_last_detection > self.lost_timeout_frames:
+                self.target_lost = True
+                self.tracked_target = None
+                self.locked_class_id = None
+                self.kalman_initialized = False
+                return False
+            
+            # Используем предсказание Калмана
+            if self.kalman_initialized:
+                predicted_pos = self._predict_kalman()
+                if predicted_pos is not None:
+                    self.tracked_target = {
+                        'center_x': predicted_pos[0],
+                        'center_y': predicted_pos[1],
+                        'w': predicted_pos[2],
+                        'h': predicted_pos[3],
+                        'area': self.tracked_target.get('area', 0) if self.tracked_target else 0,
+                        'cls_id': self.locked_class_id,
+                        'from_detection': False
+                    }
+                    return True
+            
+            self.target_lost = True
+            self.tracked_target = None
+            return False
+        
+        return True
 
     def _scale_detections(self, detections):
         """Масштабирует детекции из пространства модели (640×640) в пространство кадра (640×480)."""
@@ -345,6 +537,8 @@ class YoloDetectorNode(Node):
         self.publish_results(display_frame, detections)
 
     def get_zone(self, detections):
+        """Устаревший метод, теперь используется tracked_target для определения зоны."""
+        # Оставлен для обратной совместимости, но не используется в новой логике
         for (x1, y1, w, h, score, cls_id) in detections:
             if COCO_CLASSES.get(cls_id, '') == self.target_object:
                 center_x = x1 + w / 2
@@ -391,17 +585,32 @@ class YoloDetectorNode(Node):
         # Only publish status if there are subscribers
         if self.status_pub.get_subscription_count() > 0:
             inference_time = self.current_inference_time
-            target_found = any(COCO_CLASSES.get(cls_id, '') == self.target_object 
-                           for (_, _, _, _, _, cls_id) in detections)
+            target_found = self.tracked_target is not None and self.tracked_target.get('from_detection', False)
+            
+            # Определение зоны по отслеживаемой цели
+            zone = 'NONE'
+            if self.tracked_target:
+                center_x = self.tracked_target['center_x']
+                normalized = center_x / 640.0
+                if normalized < 0.35:
+                    zone = 'LEFT'
+                elif normalized > 0.65:
+                    zone = 'RIGHT'
+                else:
+                    zone = 'CENTER'
+            
             status = String()
             status.data = json.dumps({
                 'target': self.target_object,
                 'found': target_found,
-                'zone': self.get_zone(detections),
+                'tracking': self.tracked_target is not None,
+                'predicted': self.tracked_target is not None and not self.tracked_target.get('from_detection', True),
+                'zone': zone,
                 'count': len(detections),
                 'classes': ', '.join([COCO_CLASSES.get(cls_id, str(cls_id)) for _, _, _, _, _, cls_id in detections]),
                 'fps': self.fps_counter['fps'],
-                'inference_time': inference_time
+                'inference_time': inference_time,
+                'frames_lost': self.frames_since_last_detection
             })
             self.status_pub.publish(status)
 
@@ -409,27 +618,60 @@ class YoloDetectorNode(Node):
             self.publish_cmd_vel(detections, frame.shape[1])
 
     def publish_cmd_vel(self, detections, frame_width):
+        """
+        Управление движением с использованием магнитного преследования:
+        - Использует отфильтрованную позицию из фильтра Калмана
+        - Продолжает движение к предсказанной позиции при кратковременной потере цели
+        - Плавное торможение при приближении к цели
+        """
         twist = Twist()
-        target_found = False
-
-        for (x1, y1, w, h, score, cls_id) in detections:
-            if COCO_CLASSES.get(cls_id, '') == self.target_object:
-                target_found = True
-                center_x = x1 + w / 2
-                normalized_center = (center_x / frame_width) - 0.5
-                turn = normalized_center * self.turn_speed
-
-                if abs(normalized_center) < 0.08:
-                    twist.angular.z = 0.0
+        
+        # Сначала обновляем трекинг
+        selected = self._select_target(detections)
+        tracking_active = self._update_tracking(selected)
+        
+        # Если цель отслеживается (из детекции или предсказания)
+        if self.tracked_target is not None:
+            center_x = self.tracked_target['center_x']
+            w = self.tracked_target.get('w', 50)
+            h = self.tracked_target.get('h', 50)
+            from_detection = self.tracked_target.get('from_detection', True)
+            
+            # Нормализованный центр относительно кадра
+            normalized_center = (center_x / frame_width) - 0.5
+            
+            # Оценка расстояния по площади объекта (чем больше — тем ближе)
+            area = w * h
+            distance_factor = min(1.0, 5000.0 / max(area, 1))  # 1.0 = далеко, 0.2 = близко
+            
+            # Зона захвата — уже для стабильности
+            capture_zone = 0.05 if from_detection else 0.08
+            
+            if abs(normalized_center) < capture_zone:
+                # Цель в центре — движемся прямо
+                twist.angular.z = 0.0
+                
+                # Плавное регулирование скорости по расстоянию
+                if distance_factor > 0.6:
                     twist.linear.x = self.max_linear_speed
-                else:
-                    twist.angular.z = -turn
+                elif distance_factor > 0.3:
                     twist.linear.x = self.max_linear_speed * 0.5
-                break
-
-        if not target_found:
+                else:
+                    twist.linear.x = self.max_linear_speed * 0.2  # Медленное приближение
+            else:
+                # Поворот к цели
+                turn = normalized_center * self.turn_speed * 1.2  # Усиленный поворот для быстроты
+                twist.angular.z = -turn
+                twist.linear.x = self.max_linear_speed * 0.3  # Сниженная скорость при повороте
+            
+            # Логирование состояния
+            if not from_detection:
+                self.get_logger().debug(f'🔮 Predicting target position (frames lost: {self.frames_since_last_detection})')
+        else:
+            # Цель потеряна окончательно — поиск вращением
             twist.angular.z = self.turn_speed * 0.5
             twist.linear.x = 0.0
+            self.get_logger().debug('🔍 Target lost, searching...')
 
         self.cmd_vel_pub.publish(twist)
 
