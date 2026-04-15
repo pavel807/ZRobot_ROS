@@ -148,19 +148,19 @@ class YoloDetectorNode(Node):
         super().__init__('yolo_detector')
         self.get_logger().info('🔧 Initializing Advanced YOLO Detector...')
 
-        # Параметры
-        self.declare_parameter('model_path', 'models/yolo26s-rk3588.rknn')
+        # Параметры — ОПТИМИЗИРОВАНЫ ДЛЯ СКОРОСТИ И МАНЕВРЕННОСТИ
+        self.declare_parameter('model_path', 'models/yolo26s-rk3588.rk3588.rknn')
         self.declare_parameter('camera_id', 1)
         self.declare_parameter('obj_thresh', 0.25)
         self.declare_parameter('nms_thresh', 0.45)
         self.declare_parameter('target_object', 'person')
         self.declare_parameter('enable_auto_follow', True)
-        self.declare_parameter('max_linear_speed', 0.3)
-        self.declare_parameter('turn_speed', 0.5)
-        self.declare_parameter('kalman_process_noise', 0.1)
-        self.declare_parameter('kalman_measurement_noise', 0.5)
-        self.declare_parameter('lost_timeout_frames', 15)
-        self.declare_parameter('min_target_area', 1000)
+        self.declare_parameter('max_linear_speed', 0.5)  # Увеличено с 0.3 до 0.5 м/с
+        self.declare_parameter('turn_speed', 0.8)       # Увеличено с 0.5 до 0.8 рад/с
+        self.declare_parameter('kalman_process_noise', 0.5)    # Увеличено для быстрой реакции
+        self.declare_parameter('kalman_measurement_noise', 0.3) # Уменьшено для доверия измерениям
+        self.declare_parameter('lost_timeout_frames', 10)      # Уменьшено с 15 до 10 для быстрее потери
+        self.declare_parameter('min_target_area', 500)         # Уменьшено для захвата мелких целей
 
         self.model_path = self.get_parameter('model_path').value
         self.camera_id = self.get_parameter('camera_id').value
@@ -662,25 +662,25 @@ class YoloDetectorNode(Node):
             area = w * h
             distance_factor = min(1.0, 5000.0 / max(area, 1))  # 1.0 = далеко, 0.2 = близко
             
-            # Зона захвата — уже для стабильности
-            capture_zone = 0.05 if from_detection else 0.08
+            # Зона захвата — уже для стабильности, но с повышенной чувствительностью
+            capture_zone = 0.03 if from_detection else 0.05
             
             if abs(normalized_center) < capture_zone:
-                # Цель в центре — движемся прямо
+                # Цель в центре — движемся прямо с агрессивным ускорением
                 twist.angular.z = 0.0
                 
-                # Плавное регулирование скорости по расстоянию
-                if distance_factor > 0.6:
+                # Агрессивное регулирование скорости по расстоянию для быстроты
+                if distance_factor > 0.5:
                     twist.linear.x = self.max_linear_speed
-                elif distance_factor > 0.3:
-                    twist.linear.x = self.max_linear_speed * 0.5
+                elif distance_factor > 0.2:
+                    twist.linear.x = self.max_linear_speed * 0.7
                 else:
-                    twist.linear.x = self.max_linear_speed * 0.2  # Медленное приближение
+                    twist.linear.x = self.max_linear_speed * 0.4  # Быстрое приближение
             else:
-                # Поворот к цели
-                turn = normalized_center * self.turn_speed * 1.2  # Усиленный поворот для быстроты
+                # Быстрый агрессивный поворот к цели
+                turn = normalized_center * self.turn_speed * 1.5  # Усиленный поворот для маневренности
                 twist.angular.z = -turn
-                twist.linear.x = self.max_linear_speed * 0.3  # Сниженная скорость при повороте
+                twist.linear.x = self.max_linear_speed * 0.5  # Сохраняем скорость при повороте
             
             # Логирование состояния
             if not from_detection:
