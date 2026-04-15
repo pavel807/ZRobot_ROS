@@ -1,48 +1,41 @@
-# ROS2 build artifacts
-build/
-install/
-log/
-
-# Python artifacts
+```
+# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-*.egg-info/
-.eggs/
+*.pyc
+*.pyo
+*.pyd
 
-# venv
+# Virtual environments
 venv/
-
-# C++ artifacts
-*.o
-*.obj
-*.a
-*.lib
-*.so.*
-*.dylib
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.qwen/
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Models (large files)
-*.rknn
-models/
+.venv/
+env/
 
 # Logs
 *.log
 
-# Configuration overrides
-*.yaml.local
-!ldlidar_stl_ros2/ldlidar_driver/include/core/
-!ldlidar_stl_ros2/ldlidar_driver/src/core/
+# Environment variables
+.env
+.env.local
+*.env.*
+
+# Coverage reports
+.coverage
+htmlcov/
+coverage/
+
+# IDE specific
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# OS generated
+.DS_Store
+Thumbs.db
+
+# Build directories
+build/
+dist/
+target/
+```
