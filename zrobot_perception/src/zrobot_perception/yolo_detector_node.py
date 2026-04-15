@@ -552,8 +552,26 @@ class YoloDetectorNode(Node):
         return 'NONE'
 
     def publish_results(self, frame, detections):
-        # Only publish image if there are subscribers
+        # Копируем кадр только если есть подписчики и нужно рисовать
         if self.image_pub.get_subscription_count() > 0:
+            # Рисуем рамки толщиной 1px для визуализации детекций
+            for (x1, y1, w, h, score, cls_id) in detections:
+                x1_int = int(x1)
+                y1_int = int(y1)
+                x2_int = int(x1 + w)
+                y2_int = int(y1 + h)
+                # Рамка 1px (thickness=1)
+                cv2.rectangle(frame, (x1_int, y1_int), (x2_int, y2_int), (0, 255, 0), 1)
+            
+            # Рисуем рамку для отслеживаемой цели (если есть)
+            if self.tracked_target is not None:
+                tx = int(self.tracked_target['center_x'] - self.tracked_target.get('w', 50) / 2)
+                ty = int(self.tracked_target['center_y'] - self.tracked_target.get('h', 50) / 2)
+                tw = int(self.tracked_target.get('w', 50))
+                th = int(self.tracked_target.get('h', 50))
+                # Синяя рамка для отслеживаемой цели
+                cv2.rectangle(frame, (tx, ty), (tx + tw, ty + th), (255, 0, 0), 1)
+            
             img_msg = self.cv_bridge.cv2_to_imgmsg(frame, encoding='bgr8')
             img_msg.header.stamp = self.get_clock().now().to_msg()
             img_msg.header.frame_id = 'camera'
