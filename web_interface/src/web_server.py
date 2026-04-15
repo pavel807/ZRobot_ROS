@@ -429,11 +429,6 @@ class WebInterfaceNode(Node):
                     msg = String()
                     msg.data = str(value)
                     self.target_pub.publish(msg)
-                elif key == 'obstacle_avoidance_enabled':
-                    msg = Bool()
-                    msg.data = bool(value)
-                    self.obstacle_enable_pub.publish(msg)
-                    self.system_state['obstacle_avoidance']['enabled'] = bool(value)
                 elif key == 'min_safe_distance':
                     self.system_state['obstacle_avoidance']['min_safe_distance'] = float(value)
                 elif key == 'slow_down_distance':
@@ -497,12 +492,6 @@ class WebInterfaceNode(Node):
 
     async def handle_obstacle_config(self, request):
         data = await request.json()
-        if 'enabled' in data:
-            self.settings['obstacle_avoidance_enabled'] = data['enabled']
-            self.system_state['obstacle_avoidance']['enabled'] = data['enabled']
-            msg = Bool()
-            msg.data = data['enabled']
-            self.obstacle_enable_pub.publish(msg)
         if 'min_distance' in data:
             self.settings['min_safe_distance'] = data['min_distance']
             self.system_state['obstacle_avoidance']['min_safe_distance'] = data['min_distance']
@@ -720,23 +709,6 @@ class WebInterfaceNode(Node):
         }
         .setting-row label { font-size: 12px; color: #00aa30; }
 
-        /* Rectangular toggle switch */
-        .toggle-switch {
-            position: relative; width: 48px; height: 22px;
-        }
-        .toggle-switch input { opacity: 0; width: 0; height: 0; }
-        .toggle-slider {
-            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-            background: #111; border: 1px solid #00ff41; transition: 0.2s;
-        }
-        .toggle-slider:before {
-            position: absolute; content: ""; height: 14px; width: 14px;
-            left: 3px; bottom: 3px; background: #00aa30;
-            transition: 0.2s;
-        }
-        .toggle-switch input:checked + .toggle-slider { background: #003300; }
-        .toggle-switch input:checked + .toggle-slider:before { transform: translateX(26px); background: #00ff41; box-shadow: 0 0 5px #00ff41; }
-
         select, input[type="range"] {
             width: 100%; padding: 6px; background: #111;
             border: 1px solid #00ff41;
@@ -887,10 +859,7 @@ class WebInterfaceNode(Node):
                 </div>
                 <div class="setting-row" style="margin-top: 10px;">
                     <label>АКТИВНО</label>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="obstacleToggle" checked onchange="toggleObstacle(this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
+                    <span style="font-size: 11px; color: #00aa30;">[Всегда активно]</span>
                 </div>
             </div>
 
@@ -1040,10 +1009,7 @@ class WebInterfaceNode(Node):
                 </div>
                 <div class="setting-row">
                     <label>Трекинг</label>
-                    <label class="toggle-switch">
-                        <input type="checkbox" id="trackingToggle" checked onchange="toggleSetting('enable_tracking', this.checked)">
-                        <span class="toggle-slider"></span>
-                    </label>
+                    <span style="font-size: 11px; color: #00aa30;">[Всегда активен]</span>
                 </div>
                 <div class="setting-row">
                     <label>Безоп. Дист.</label>
@@ -1158,7 +1124,6 @@ class WebInterfaceNode(Node):
 
             document.getElementById('obstacleDistance').textContent =
                 obstacle.min_distance_m < 10 ? obstacle.min_distance_m.toFixed(2) : '--';
-            document.getElementById('obstacleToggle').checked = obstacle.enabled;
 
             const lidar = state.lidar || {};
             const lidarConn = document.getElementById('lidarConnected');
@@ -1183,8 +1148,6 @@ class WebInterfaceNode(Node):
         function updateSettingsUI(settings) {
             document.getElementById('targetSelect').value = settings.target_object || 'person';
             document.getElementById('confSlider').value = settings.conf_threshold || 0.45;
-            document.getElementById('trackingToggle').checked = settings.enable_tracking !== false;
-            document.getElementById('obstacleToggle').checked = settings.obstacle_avoidance_enabled !== false;
             document.getElementById('safeDistSlider').value = settings.min_safe_distance || 0.3;
         }
 
@@ -1509,20 +1472,6 @@ class WebInterfaceNode(Node):
             fetch('/api/confidence', {
                 method: 'POST', headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({confidence: parseFloat(value)})
-            });
-        }
-
-        function toggleSetting(key, value) {
-            fetch('/api/settings', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({[key]: value})
-            });
-        }
-
-        function toggleObstacle(value) {
-            fetch('/api/obstacle', {
-                method: 'POST', headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({enabled: value})
             });
         }
 

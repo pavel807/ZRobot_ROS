@@ -290,21 +290,24 @@ class YoloDetectorNode(Node):
         if not ret:
             return
 
-        # Preprocess
+        # Store original frame without copying for buffer
+        fid = self.frame_id_counter
+        self.frame_id_counter += 1
+        
+        # Preprocess for NPU (resize + color convert)
         if frame.shape[0] != IMG_SIZE or frame.shape[1] != IMG_SIZE:
             resized = cv2.resize(frame, (IMG_SIZE, IMG_SIZE))
         else:
             resized = frame
         rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
 
-        # Store frame
-        fid = self.frame_id_counter
-        self.frame_id_counter += 1
-        with self.frame_buffer_lock:
-            self.frame_buffer[fid] = frame.copy()
-            if len(self.frame_buffer) > self.max_buffer_size:
-                oldest = min(self.frame_buffer.keys())
-                del self.frame_buffer[oldest]
+        # Store frame in buffer (only if there are subscribers)
+        if self.image_pub.get_subscription_count() > 0:
+            with self.frame_buffer_lock:
+                self.frame_buffer[fid] = frame
+                if len(self.frame_buffer) > self.max_buffer_size:
+                    oldest = min(self.frame_buffer.keys())
+                    del self.frame_buffer[oldest]
 
         # Send to NPU — неблокирующая отправка
         try:
@@ -314,33 +317,22 @@ class YoloDetectorNode(Node):
             # Очередь переполнена — пропускаем кадр, не блокируем главный поток
             pass
 
-        # Get results
+        # Get results — avoid unnecessary list copy
         with self.results_lock:
             det_fid = self.current_frame_id
-            detections = list(self.current_detections)
+            detections = self.current_detections
 
         # Масштабируем детекции
         detections = self._scale_detections(detections)
 
-        # Retrieve display frame
-        display_frame = None
-        with self.frame_buffer_lock:
-            if det_fid in self.frame_buffer:
-                display_frame = self.frame_buffer[det_fid].copy()
-            elif self.frame_buffer:
-                display_frame = self.frame_buffer[max(self.frame_buffer.keys())].copy()
-
-        if display_frame is None:
-            display_frame = frame
-
-        # Draw detections
-        for (x1, y1, w, h, score, cls_id) in detections:
-            x1_i, y1_i = int(x1), int(y1)
-            x2_i, y2_i = int(x1 + w), int(y1 + h)
-            label = f"{COCO_CLASSES.get(cls_id, cls_id)} {score:.2f}"
-            cv2.rectangle(display_frame, (x1_i, y1_i), (x2_i, y2_i), (0, 255, 0), 1)
-            cv2.putText(display_frame, label, (x1_i, y1_i - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+        # Retrieve display frame — avoid unnecessary copies
+        display_frame = frame
+        if self.image_pub.get_subscription_count() > 0:
+            with self.frame_buffer_lock:
+                if det_fid in self.frame_buffer:
+                    display_frame = self.frame_buffer[det_fid]
+                elif self.frame_buffer:
+                    display_frame = self.frame_buffer[max(self.frame_buffer.keys())]
 
         # FPS
         self.fps_counter['count'] += 1
@@ -366,12 +358,14 @@ class YoloDetectorNode(Node):
         return 'NONE'
 
     def publish_results(self, frame, detections):
+        # Only publish image if there are subscribers
         if self.image_pub.get_subscription_count() > 0:
             img_msg = self.cv_bridge.cv2_to_imgmsg(frame, encoding='bgr8')
             img_msg.header.stamp = self.get_clock().now().to_msg()
             img_msg.header.frame_id = 'camera'
             self.image_pub.publish(img_msg)
 
+        # Only publish detections if there are subscribers
         if self.detections_pub.get_subscription_count() > 0:
             det_array = Detection2DArray()
             det_array.header.stamp = self.get_clock().now().to_msg()
@@ -394,9 +388,9 @@ class YoloDetectorNode(Node):
 
             self.detections_pub.publish(det_array)
 
+        # Only publish status if there are subscribers
         if self.status_pub.get_subscription_count() > 0:
             inference_time = self.current_inference_time
-            # Проверяем только целевой объект
             target_found = any(COCO_CLASSES.get(cls_id, '') == self.target_object 
                            for (_, _, _, _, _, cls_id) in detections)
             status = String()
