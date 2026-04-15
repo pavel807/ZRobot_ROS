@@ -155,12 +155,13 @@ class YoloDetectorNode(Node):
         self.declare_parameter('nms_thresh', 0.45)
         self.declare_parameter('target_object', 'person')
         self.declare_parameter('enable_auto_follow', True)
-        self.declare_parameter('max_linear_speed', 0.5)  # Увеличено с 0.3 до 0.5 м/с
-        self.declare_parameter('turn_speed', 0.8)       # Увеличено с 0.5 до 0.8 рад/с
+        self.declare_parameter('max_linear_speed', 0.7)  # Увеличено с 0.5 до 0.7 м/с для максимальной скорости
+        self.declare_parameter('turn_speed', 1.2)       # Увеличено с 0.8 до 1.2 рад/с для резких поворотов
         self.declare_parameter('kalman_process_noise', 0.5)    # Увеличено для быстрой реакции
         self.declare_parameter('kalman_measurement_noise', 0.3) # Уменьшено для доверия измерениям
         self.declare_parameter('lost_timeout_frames', 10)      # Уменьшено с 15 до 10 для быстрее потери
         self.declare_parameter('min_target_area', 500)         # Уменьшено для захвата мелких целей
+        self.declare_parameter('height_speed_factor', 2.5)     # Коэффициент ускорения по высоте объекта
 
         self.model_path = self.get_parameter('model_path').value
         self.camera_id = self.get_parameter('camera_id').value
@@ -174,6 +175,7 @@ class YoloDetectorNode(Node):
         self.kalman_measurement_noise = self.get_parameter('kalman_measurement_noise').value
         self.lost_timeout_frames = self.get_parameter('lost_timeout_frames').value
         self.min_target_area = self.get_parameter('min_target_area').value
+        self.height_speed_factor = self.get_parameter('height_speed_factor').value
 
         self.get_logger().info(f'📦 COCO Classes: {len(COCO_CLASSES)} objects')
 
@@ -641,6 +643,7 @@ class YoloDetectorNode(Node):
         - Использует отфильтрованную позицию из фильтра Калмана
         - Продолжает движение к предсказанной позиции при кратковременной потере цели
         - Плавное торможение при приближении к цели
+        - НОВЫЙ АЛГОРИТМ: Чем выше объект в кадре (ближе к горизонту), тем больше скорость
         """
         twist = Twist()
         
@@ -651,6 +654,7 @@ class YoloDetectorNode(Node):
         # Если цель отслеживается (из детекции или предсказания)
         if self.tracked_target is not None:
             center_x = self.tracked_target['center_x']
+            center_y = self.tracked_target['center_y']  # Y-координата центра объекта
             w = self.tracked_target.get('w', 50)
             h = self.tracked_target.get('h', 50)
             from_detection = self.tracked_target.get('from_detection', True)
@@ -662,6 +666,13 @@ class YoloDetectorNode(Node):
             area = w * h
             distance_factor = min(1.0, 5000.0 / max(area, 1))  # 1.0 = далеко, 0.2 = близко
             
+            # НОВЫЙ АЛГОРИТМ: Высота объекта определяет базовую скорость
+            # Чем выше объект (меньше center_y), тем дальше он находится и тем быстрее нужно двигаться
+            # Нормализуем высоту: 0 (верх кадра) = 1.0, 480 (низ кадра) = 0.0
+            height_factor = max(0.0, 1.0 - (center_y / 480.0))
+            # Применяем коэффициент усиления для агрессивного ускорения
+            height_speed_boost = min(1.0, height_factor * self.height_speed_factor)
+            
             # Зона захвата — уже для стабильности, но с повышенной чувствительностью
             capture_zone = 0.03 if from_detection else 0.05
             
@@ -669,18 +680,24 @@ class YoloDetectorNode(Node):
                 # Цель в центре — движемся прямо с агрессивным ускорением
                 twist.angular.z = 0.0
                 
-                # Агрессивное регулирование скорости по расстоянию для быстроты
+                # Базовая скорость на основе расстояния (площади объекта)
+                base_speed = self.max_linear_speed
                 if distance_factor > 0.5:
-                    twist.linear.x = self.max_linear_speed
+                    base_speed = self.max_linear_speed
                 elif distance_factor > 0.2:
-                    twist.linear.x = self.max_linear_speed * 0.7
+                    base_speed = self.max_linear_speed * 0.7
                 else:
-                    twist.linear.x = self.max_linear_speed * 0.4  # Быстрое приближение
+                    base_speed = self.max_linear_speed * 0.4  # Быстрое приближение
+                
+                # Применяем буст скорости от высоты объекта
+                # Если объект высоко в кадре — увеличиваем скорость
+                twist.linear.x = min(self.max_linear_speed, base_speed * (1.0 + height_speed_boost))
             else:
                 # Быстрый агрессивный поворот к цели
                 turn = normalized_center * self.turn_speed * 1.5  # Усиленный поворот для маневренности
                 twist.angular.z = -turn
-                twist.linear.x = self.max_linear_speed * 0.5  # Сохраняем скорость при повороте
+                # Сохраняем скорость при повороте с учётом высоты объекта
+                twist.linear.x = self.max_linear_speed * 0.5 * (1.0 + height_speed_boost * 0.5)
             
             # Логирование состояния
             if not from_detection:
